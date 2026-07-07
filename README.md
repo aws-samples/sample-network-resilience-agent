@@ -199,7 +199,7 @@ Every rule encodes an AWS-documented best practice from:
 
 1. **[AWS Direct Connect Resiliency Toolkit](https://docs.aws.amazon.com/directconnect/latest/UserGuide/resilency_toolkit.html)**
 2. **[AWS Well-Architected Framework — Reliability Pillar](https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html)**
-3. **[AWS Direct Connect Best Practices](https://docs.aws.amazon.com/directconnect/latest/UserGuide/best-practices.html)**
+3. **[AWS Direct Connect User Guide](https://docs.aws.amazon.com/directconnect/latest/UserGuide/best-practices.html)**
 
 For the full rule-by-rule reference — every resiliency rule and best-practice check with its severity, trigger, recommendation, and whether it's **detected** from AWS APIs/CloudWatch versus **guidance-only** (and why certain checks stay guidance) — see **[RECOMMENDATION-COVERAGE.md](dx-visualizer/docs/RECOMMENDATION-COVERAGE.md)**.
 
