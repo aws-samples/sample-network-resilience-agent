@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Pre-commit hook: runs TypeScript typecheck on both workspaces so issues
+# like unused locals (TS6133) or type errors are caught before the commit
+# lands, instead of failing in CI or on a teammate's machine.
+#
+# Uses `tsc --noEmit` (fast, ~1–2s) rather than the full `vite build`.
+# Skipped when the commit touches no TS/TSX files in either workspace.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Only run when staged changes include TS/TSX files in a workspace we typecheck.
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+check_dx=0
+check_backend=0
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  case "$f" in
+    dx-visualizer/*.ts|dx-visualizer/*.tsx|dx-visualizer/**/*.ts|dx-visualizer/**/*.tsx) check_dx=1 ;;
+    backend/*.ts|backend/**/*.ts) check_backend=1 ;;
+  esac
+done <<< "$staged"
+
+if [[ $check_dx -eq 0 && $check_backend -eq 0 ]]; then
+  exit 0
+fi
+
+fail=0
+
+if [[ $check_dx -eq 1 ]]; then
+  echo "[pre-commit] typechecking dx-visualizer..."
+  if ! (cd "$repo_root/dx-visualizer" && npx --no-install tsc -b --noEmit); then
+    fail=1
+  fi
+fi
+
+if [[ $check_backend -eq 1 ]]; then
+  echo "[pre-commit] typechecking backend..."
+  if ! (cd "$repo_root/backend" && npm run -s typecheck); then
+    fail=1
+  fi
+fi
+
+if [[ $fail -ne 0 ]]; then
+  echo
+  echo "[pre-commit] typecheck failed — fix the errors above or use --no-verify to skip (not recommended)."
+  exit 1
+fi

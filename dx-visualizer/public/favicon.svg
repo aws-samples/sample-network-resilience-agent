@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- "aws" text -->
+  <text x="64" y="62" text-anchor="middle" font-family="'Amazon Ember', Arial, Helvetica, sans-serif" font-weight="bold" font-size="48" fill="#252F3E" letter-spacing="-1">aws</text>
+  <!-- Orange smile arc -->
+  <path d="M28 82 C44 96, 84 96, 100 82" stroke="#FF9900" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <!-- Arrow tip -->
+  <path d="M90 76 L100 82 L92 90" stroke="#FF9900" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

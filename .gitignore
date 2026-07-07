@@ -1,0 +1,26 @@
+.DS_Store
+node_modules/
+.playwright-mcp/
+*.png
+dist/
+
+# CSE security scanner artifacts (auto-added by cse init)
+.security-scan/
+pre-cr
+
+# any ai toolings
+.kiro/
+.ai/
+.prompts/
+.claude/
+CLAUDE.md
+.cursor/
+.cursorules
+.copilot/
+.windsurf/
+.codeium/
+.aider*
+.amazonq/
+.qdeveloper/
+.cline/
+.clinerules

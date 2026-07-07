@@ -1,0 +1,356 @@
+export interface DxConnection {
+  connectionId: string;
+  connectionName: string;
+  connectionState: string;
+  location: string;
+  bandwidth: string;
+  lagId?: string;
+  partnerName?: string;
+  vlan?: number;
+  region: string;
+  hasBfd?: boolean;
+  awsDeviceV2?: string;
+  awsLogicalDeviceId?: string;
+  // True when this record was synthesized from a VIF whose underlying cable
+  // is owned by another account (hosted VIF on external connection). The
+  // visualizer renders these with an amber accent so it's clear the physical
+  // path was reconstructed rather than observed via DescribeConnections.
+  isInferred?: boolean;
+}
+
+export interface BgpPeer {
+  bgpPeerId: string;
+  bgpPeerState: string;
+  bgpStatus: string;
+  asn: number;
+  customerAddress: string;
+  amazonAddress: string;
+}
+
+export interface DxVirtualInterface {
+  virtualInterfaceId: string;
+  virtualInterfaceName: string;
+  virtualInterfaceType: 'private' | 'public' | 'transit';
+  virtualInterfaceState: string;
+  connectionId: string;
+  directConnectGatewayId?: string;
+  virtualGatewayId?: string;
+  vlan: number;
+  asn: number;
+  addressFamily?: 'ipv4' | 'ipv6';
+  mtu?: number;
+  bgpPeers: BgpPeer[];
+  routeFilterPrefixes?: { cidr: string }[];
+  region: string;
+  location?: string;
+  ownerAccount?: string;
+  awsDeviceV2?: string;
+  awsLogicalDeviceId?: string;
+}
+
+export interface DxGateway {
+  directConnectGatewayId: string;
+  directConnectGatewayName: string;
+  amazonSideAsn: number;
+  directConnectGatewayState: string;
+}
+
+export interface DxGatewayAssociation {
+  directConnectGatewayId: string;
+  associationId?: string;
+  associatedGateway: {
+    id: string;
+    type: 'virtualPrivateGateway' | 'transitGateway' | undefined;
+    region: string;
+    ownerAccount: string;
+  };
+  // Populated when the DXGW is associated directly to a Cloud WAN core
+  // network (AWS returns this in `associatedCoreNetwork` instead of
+  // `associatedGateway`). Topology-builder draws a DXGW → Core Network edge
+  // for these.
+  associatedCoreNetwork?: {
+    id: string;
+    ownerAccount: string;
+    attachmentId: string;
+  };
+  associationState: string;
+  allowedPrefixes: string[];
+  // True when AWS returned a stub (no gateway id/type) AND the proposals
+  // backfill couldn't resolve it. These are typically prefix-pool / EDGLESS
+  // associations where AWS redacts the associated gateway's identity from
+  // the DXGW-owner view. Surfaced in the Hidden Associations zone.
+  isPrefixPoolStub?: boolean;
+}
+
+export interface DxLocation {
+  locationCode: string;
+  locationName: string;
+  region: string;
+  availablePortSpeeds: string[];
+}
+
+export interface DxLag {
+  lagId: string;
+  lagName: string;
+  connectionsBandwidth: string;
+  numberOfConnections: number;
+  minimumLinks: number;
+  location: string;
+  region: string;
+  lagState: string;
+  connections: DxConnection[];
+}
+
+export interface Vpc {
+  vpcId: string;
+  cidrBlock: string;
+  tags: Record<string, string>;
+  region: string;
+  state: string;
+  ownerAccountId?: string;
+}
+
+export interface VpnGateway {
+  vpnGatewayId: string;
+  vpcAttachments: { vpcId: string; state: string }[];
+  type: string;
+  amazonSideAsn: number;
+  state: string;
+  tags: Record<string, string>;
+}
+
+export interface TransitGateway {
+  transitGatewayId: string;
+  transitGatewayArn: string;
+  state: string;
+  ownerId: string;
+  description: string;
+  amazonSideAsn: number;
+  tags: Record<string, string>;
+}
+
+export interface TransitGatewayAttachment {
+  transitGatewayAttachmentId: string;
+  transitGatewayId: string;
+  resourceType: 'vpc' | 'vpn' | 'direct-connect-gateway' | 'peering' | 'connect';
+  resourceId: string;
+  resourceOwnerId: string;
+  state: string;
+  /** Tag-derived display name, populated for categories that render as standalone nodes (e.g. connect). */
+  name?: string;
+}
+
+export interface VpcPeeringConnection {
+  vpcPeeringConnectionId: string;
+  state: string;
+  requesterVpc: {
+    vpcId: string;
+    cidrBlock: string;
+    ownerId: string;
+    region: string;
+  };
+  accepterVpc: {
+    vpcId: string;
+    cidrBlock: string;
+    ownerId: string;
+    region: string;
+  };
+  tags: Record<string, string>;
+}
+
+export interface TransitGatewayPeeringAttachment {
+  transitGatewayAttachmentId: string;
+  requesterTgwInfo: {
+    transitGatewayId: string;
+    region: string;
+    ownerId: string;
+  };
+  accepterTgwInfo: {
+    transitGatewayId: string;
+    region: string;
+    ownerId: string;
+  };
+  state: string;
+  tags: Record<string, string>;
+}
+
+export interface VpnTunnel {
+  outsideIpAddress: string;
+  status: 'UP' | 'DOWN';
+  statusMessage?: string;
+  acceptedRouteCount?: number;
+  // AWS-side DPD config from DescribeVpnConnections → Options.TunnelOptions.
+  // Customer-gateway-side DPD config is not exposed by any AWS API.
+  dpdTimeoutSeconds?: number;
+  dpdTimeoutAction?: string;
+}
+
+export interface VpnConnection {
+  vpnConnectionId: string;
+  vpnGatewayId?: string;
+  transitGatewayId?: string;
+  customerGatewayId: string;
+  state: string;
+  type: string;
+  category: string;
+  customerGatewayAddress: string;
+  tunnels: VpnTunnel[];
+  tags: Record<string, string>;
+}
+
+export interface CustomerGateway {
+  customerGatewayId: string;
+  bgpAsn: string;
+  ipAddress: string;
+  state: string;
+  type: string;
+  tags: Record<string, string>;
+}
+
+export interface CloudWanCoreNetwork {
+  coreNetworkId: string;
+  coreNetworkArn: string;
+  globalNetworkId: string;
+  description: string;
+  state: string;
+  edges: {
+    edgeLocation: string;
+    asn: number;
+    insideCidrBlocks: string[];
+  }[];
+  segments: {
+    name: string;
+    edgeLocations: string[];
+    sharedSegments: string[];
+  }[];
+}
+
+export interface CloudWanAttachment {
+  attachmentId: string;
+  coreNetworkId: string;
+  ownerAccountId: string;
+  attachmentType: 'vpc' | 'site-to-site-vpn' | 'transit-gateway-route-table' | 'connect' | 'direct-connect-gateway';
+  edgeLocation: string;
+  resourceArn: string;
+  segmentName: string;
+  state: string;
+  tags: Record<string, string>;
+}
+
+export interface CloudWanPeering {
+  peeringId: string;
+  coreNetworkId: string;
+  peeringType: string;
+  edgeLocation: string;
+  resourceArn: string;
+  state: string;
+  tags: Record<string, string>;
+}
+
+export interface CloudWanRoute {
+  destinationCidrBlock: string;
+  destinations: {
+    coreNetworkAttachmentId: string;
+    segmentName: string;
+    edgeLocation: string;
+    resourceType: string;
+    resourceId: string;
+  }[];
+  type: 'static' | 'propagated';
+  state: 'active' | 'blackhole';
+}
+
+export interface CloudWanSegmentRoutes {
+  segmentName: string;
+  edgeLocation: string;
+  routes: CloudWanRoute[];
+}
+
+export interface VpcRoute {
+  destinationCidrBlock?: string;
+  destinationIpv6CidrBlock?: string;
+  destinationPrefixListId?: string;
+  /** Target identifier — only one of the *Id / *Arn fields will be populated */
+  gatewayId?: string;
+  natGatewayId?: string;
+  transitGatewayId?: string;
+  vpcPeeringConnectionId?: string;
+  networkInterfaceId?: string;
+  egressOnlyInternetGatewayId?: string;
+  carrierGatewayId?: string;
+  localGatewayId?: string;
+  coreNetworkArn?: string;
+  instanceId?: string;
+  /** AWS-reported origin: CreateRouteTable, CreateRoute, EnableVgwRoutePropagation */
+  origin?: string;
+  state?: 'active' | 'blackhole';
+}
+
+export interface VpcRouteTable {
+  routeTableId: string;
+  vpcId: string;
+  /** True when this is the VPC's main route table (default for unassociated subnets) */
+  isMain: boolean;
+  /** Subnet IDs explicitly associated with this route table */
+  associatedSubnetIds: string[];
+  tags: Record<string, string>;
+  routes: VpcRoute[];
+}
+
+export interface TgwRouteTable {
+  transitGatewayRouteTableId: string;
+  transitGatewayId: string;
+  state: string;
+  defaultAssociationRouteTable: boolean;
+  defaultPropagationRouteTable: boolean;
+  tags: Record<string, string>;
+}
+
+export interface TgwRoute {
+  destinationCidrBlock: string;
+  transitGatewayAttachments: {
+    transitGatewayAttachmentId: string;
+    resourceType: string;
+    resourceId: string;
+  }[];
+  type: 'static' | 'propagated';
+  state: 'active' | 'blackhole';
+}
+
+export interface TgwRouteTableWithRoutes {
+  routeTable: TgwRouteTable;
+  routes: TgwRoute[];
+}
+
+export interface DxMaintenanceEvent {
+  arn: string;
+  eventTypeCode: string;
+  region: string;
+  startTime?: string;
+  endTime?: string;
+  lastUpdatedTime?: string;
+  statusCode: string;
+  affectedResourceIds: string[];
+  description: string;
+  accountId?: string;
+}
+
+export interface AwsCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  region: string;
+  /** Optional list of spoke account IDs to enrich cross-account VPCs with name/CIDR */
+  spokeAccounts?: string[];
+  /** IAM role name to assume in spoke accounts (default: NetworkReadOnlyRole) */
+  crossAccountRoleName?: string;
+  /** Authentication method used to obtain these credentials */
+  authMethod?: 'accessKey' | 'sso';
+  /** SSO session metadata (display + expiry tracking only — access token is NOT persisted) */
+  ssoMeta?: {
+    expiration: number;
+    ssoRegion: string;
+    accountId: string;
+    roleName: string;
+  };
+}

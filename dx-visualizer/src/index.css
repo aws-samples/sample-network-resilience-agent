@@ -1,0 +1,461 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+body {
+  margin: 0;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+@keyframes edge-dot-flow {
+  to {
+    offset-distance: 100%;
+  }
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.recommended-edge path {
+  animation: dash-flow 2s linear infinite;
+}
+
+.edge-delete-btn:hover {
+  background-color: #ef4444 !important;
+  color: #ffffff !important;
+}
+
+/* Monospace font for resource IDs, CIDRs, ASNs, IPs, and other technical identifiers */
+.font-tech {
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: -0.01em;
+}
+
+.react-flow__node {
+  font-size: 12px;
+}
+
+/* React Flow handles ship with a 1px white ring (border-color: #fff, box-sizing:
+   border-box). On our 6px dots that ring eats 33% of the visible fill and creates
+   a subtle gap between the edge line and the dot. Drop the ring so the dot reads
+   as a single solid circle flush with the edge endpoint. */
+.react-flow__handle {
+  border: none !important;
+}
+
+/* Opt in to text selection inside node cards and edge labels — only in lock mode.
+   React Flow sets user-select: none on nodes (and we mirror it on edge labels for
+   drag ergonomics); .selectable-text (paired with .nodrag and .nopan) opts back
+   in so users can copy labels, IDs, CIDRs, ASNs, etc. while reading or demoing.
+   Gated on [data-locked="true"] so unlock mode keeps the native no-select
+   behavior and dragging isn't fighting an active text highlight. */
+[data-locked="true"] .selectable-text,
+[data-locked="true"] .selectable-text * {
+  -webkit-user-select: text;
+     -moz-user-select: text;
+          user-select: text;
+}
+[data-locked="true"] .selectable-text {
+  cursor: text;
+}
+[data-locked="true"] .selectable-text :where(button, a, [role="button"], input, select, textarea) {
+  cursor: pointer;
+}
+[data-locked="true"] .selectable-text ::selection {
+  background: rgba(139, 92, 246, 0.35);
+  color: inherit;
+}
+[data-theme="light"][data-locked="true"] .selectable-text ::selection {
+  background: rgba(124, 58, 237, 0.22);
+  color: inherit;
+}
+
+/* Light theme: darken washed-out slate text inside nodes so labels read cleanly on white cards.
+   Node components use slate-400/500 which were tuned for dark backgrounds. */
+[data-theme="light"] .react-flow__node .text-slate-500 {
+  color: #475569; /* slate-600 */
+}
+[data-theme="light"] .react-flow__node .text-slate-400 {
+  color: #64748b; /* slate-500 */
+}
+[data-theme="light"] .react-flow__node .text-slate-300 {
+  color: #334155; /* slate-700 */
+}
+
+
+.react-flow__edgelabel-renderer {
+  z-index: 1001 !important;
+  position: relative;
+}
+
+/* Let edges render above container zones but below individual nodes */
+.react-flow__edges {
+  z-index: 500 !important;
+}
+
+.react-flow__nodes {
+  z-index: 0 !important;
+}
+
+/* Thin custom scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Shimmer animation for thinking indicator */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(139, 92, 246, 0.15) 25%,
+    rgba(139, 92, 246, 0.3) 50%,
+    rgba(139, 92, 246, 0.15) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+.thinking-shimmer-light {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(124, 58, 237, 0.08) 25%,
+    rgba(124, 58, 237, 0.18) 50%,
+    rgba(124, 58, 237, 0.08) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* Subtle noise texture for chat background */
+.chat-bg-dark {
+  background-color: #0f172a;
+  background-image:
+    radial-gradient(ellipse at 20% 0%, rgba(139, 92, 246, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 100%, rgba(6, 182, 212, 0.04) 0%, transparent 60%);
+}
+
+.chat-bg-light {
+  background-color: #e8eaef;
+  background-image:
+    radial-gradient(ellipse at 20% 0%, rgba(124, 58, 237, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 100%, rgba(14, 165, 233, 0.05) 0%, transparent 60%);
+}
+
+/* Spotlight ring — rotating purple/blue/white gradient around a node border.
+   Triggered when the scorecard DXGW row (or similar out-of-canvas affordance)
+   wants to point at a single node without pulling in its connected path.
+   The white stops punch highlights into the sweep so the ring reads against
+   both dark and light canvases without washing out the brand colors. */
+@property --spotlight-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes spotlight-spin {
+  to { --spotlight-angle: 360deg; }
+}
+
+.node-spotlight::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--spotlight-angle),
+    #8b5cf6, #ffffff, #3b82f6, #ffffff, #8b5cf6, #ffffff, #3b82f6
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: spotlight-spin 2.5s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Fallback for browsers without @property support — plain bright ring still reads. */
+@supports not (background: conic-gradient(from 0deg, red, blue)) {
+  .node-spotlight::before {
+    background: #8b5cf6;
+  }
+}
+
+/* Pinned-path ring — reuses the same purple/blue/white rotating sweep as
+   `.node-spotlight` so click-pinned and scorecard-driven spotlights read as
+   the same visual affordance. */
+.node-pinned::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--spotlight-angle),
+    #8b5cf6, #ffffff, #3b82f6, #ffffff, #8b5cf6, #ffffff, #3b82f6
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: spotlight-spin 2.5s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+
+@supports not (background: conic-gradient(from 0deg, red, blue)) {
+  .node-pinned::before {
+    background: #8b5cf6;
+  }
+}
+
+/* Edge spotlight — marching-ants stroke layered over a soft purple glow
+   underneath an existing edge. Mirrors `.node-spotlight` semantically so a
+   dxvif-* chip in the maintenance calendar can point at the actual VIF edge
+   instead of the DXGW it terminates on. */
+@keyframes edge-spotlight-march {
+  to { stroke-dashoffset: -40; }
+}
+
+.edge-spotlight-march {
+  animation: edge-spotlight-march 1.2s linear infinite;
+}
+
+/* Pulse animation for live connection indicator */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.8); }
+}
+
+/* Simulation mode — pulsing red ring + vignette around the canvas */
+@keyframes sim-ring-pulse {
+  0%, 100% {
+    box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.55), inset 0 0 40px rgba(239, 68, 68, 0.08);
+  }
+  50% {
+    box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.85), inset 0 0 60px rgba(239, 68, 68, 0.14);
+  }
+}
+
+.sim-canvas-frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  animation: sim-ring-pulse 2.2s ease-in-out infinite;
+  border-radius: 0;
+}
+
+.sim-canvas-frame::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(239, 68, 68, 0.10) 100%);
+}
+
+.live-dot {
+  position: relative;
+}
+
+.live-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+/* Dark theme scrollbar — matches bg-slate-900 */
+.bg-slate-900 * {
+  scrollbar-color: #475569 transparent;
+}
+
+.bg-slate-900 *::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+.bg-slate-900 *::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Guided tour (driver.js) — theme overrides */
+.driver-popover.ra-tour-dark {
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  border-radius: 12px;
+}
+.driver-popover.ra-tour-dark .driver-popover-title {
+  color: #f1f5f9;
+  font-size: 15px;
+  font-weight: 600;
+  padding-right: 28px;
+}
+.driver-popover.ra-tour-dark .driver-popover-description {
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.driver-popover.ra-tour-dark .driver-popover-progress-text {
+  color: #64748b;
+  font-size: 11px;
+}
+.driver-popover.ra-tour-dark .driver-popover-arrow-side-right.driver-popover-arrow {
+  border-right-color: #0f172a;
+}
+.driver-popover.ra-tour-dark .driver-popover-arrow-side-left.driver-popover-arrow {
+  border-left-color: #0f172a;
+}
+.driver-popover.ra-tour-dark .driver-popover-arrow-side-top.driver-popover-arrow {
+  border-top-color: #0f172a;
+}
+.driver-popover.ra-tour-dark .driver-popover-arrow-side-bottom.driver-popover-arrow {
+  border-bottom-color: #0f172a;
+}
+.driver-popover.ra-tour-dark .driver-popover-navigation-btns button {
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  text-shadow: none;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 6px 12px;
+}
+.driver-popover.ra-tour-dark .driver-popover-navigation-btns button:hover {
+  background: #334155;
+  color: #f8fafc;
+}
+.driver-popover.ra-tour-dark .driver-popover-close-btn {
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 22px;
+  font-size: 16px;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  text-shadow: none;
+}
+.driver-popover.ra-tour-dark .driver-popover-close-btn:hover {
+  background: #1e293b;
+  color: #f8fafc;
+}
+
+.driver-popover.ra-tour-light {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  border-radius: 12px;
+}
+.driver-popover.ra-tour-light .driver-popover-title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 600;
+  padding-right: 28px;
+}
+.driver-popover.ra-tour-light .driver-popover-description {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.driver-popover.ra-tour-light .driver-popover-progress-text {
+  color: #94a3b8;
+  font-size: 11px;
+}
+.driver-popover.ra-tour-light .driver-popover-close-btn {
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 22px;
+  font-size: 16px;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  text-shadow: none;
+}
+.driver-popover.ra-tour-light .driver-popover-close-btn:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* TGW route panel scrollbar */
+.tgw-route-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139,92,246,0.3) transparent;
+}
+.tgw-route-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.tgw-route-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tgw-route-scroll::-webkit-scrollbar-thumb {
+  background: rgba(139,92,246,0.3);
+  border-radius: 4px;
+}
+.tgw-route-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(139,92,246,0.5);
+}
+
+.drop-target-highlight > div {
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.6), 0 0 12px rgba(16, 185, 129, 0.3) !important;
+  border-color: #10b981 !important;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Post-commit hook: bumps package.json versions based on conventional-commit
+# prefix in the just-made commit message.
+#
+#   feat[!]: / feat(scope)!:  → minor bump (major if "!" or BREAKING CHANGE)
+#   fix: / perf: / refactor:  → patch bump
+#   docs: / chore: / test: / style: / ci: / build:  → no bump
+#
+# When a bump is needed, this rewrites HEAD (via `git commit --amend --no-edit`)
+# to include the updated package.json files. The amend-in-post-commit pattern
+# uses a lockfile to avoid recursion.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+lock_file="$repo_root/.git/VERSION_BUMP_IN_PROGRESS"
+
+# Prevent recursive invocation when we amend below (which retriggers post-commit)
+if [[ -f "$lock_file" ]]; then
+  exit 0
+fi
+
+commit_msg="$(git log -1 --pretty=%B)"
+subject="$(printf '%s' "$commit_msg" | head -n1)"
+
+# Parse conventional commit: type(scope)!: subject  or  type: subject
+# Capture type and whether "!" marks a breaking change.
+# Regex assigned to a var so bash 3.2 (macOS default) parses it correctly.
+cc_regex='^([a-z]+)(\([^)]+\))?(!)?: .+'
+if [[ ! "$subject" =~ $cc_regex ]]; then
+  exit 0
+fi
+
+type="${BASH_REMATCH[1]}"
+bang="${BASH_REMATCH[3]:-}"
+
+# Decide base bump level from type. Types that don't warrant any release
+# exit early — breaking markers on chore/docs/test commits must not promote
+# them (prose describing a hook shouldn't trigger a bump).
+bump=""
+case "$type" in
+  feat) bump="minor" ;;
+  fix|perf|refactor) bump="patch" ;;
+  *) exit 0 ;;  # docs / chore / test / style / ci / build — no bump
+esac
+
+# Promote to major if "!" is used OR a footer line starts with "BREAKING CHANGE:"
+# (conventional-commits spec: footer, not arbitrary prose in the body).
+if [[ -n "$bang" ]] || printf '%s' "$commit_msg" | grep -qE '^BREAKING CHANGE: '; then
+  bump="major"
+fi
+
+# Bump a single package.json in-place using node (already required by the project)
+bump_package() {
+  local pkg="$1"
+  [[ -f "$pkg" ]] || return 0
+  node -e "
+    const fs = require('fs');
+    const path = '$pkg';
+    const bump = '$bump';
+    const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const [maj, min, pat] = pkg.version.split('.').map(Number);
+    const next = bump === 'major' ? [maj + 1, 0, 0]
+              : bump === 'minor' ? [maj, min + 1, 0]
+              : [maj, min, pat + 1];
+    pkg.version = next.join('.');
+    fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+    console.error(path + ': ' + [maj, min, pat].join('.') + ' → ' + pkg.version);
+  "
+}
+
+bump_package "$repo_root/dx-visualizer/package.json"
+bump_package "$repo_root/backend/package.json"
+
+# Stage and amend only if something actually changed
+if ! git diff --quiet -- '*/package.json'; then
+  touch "$lock_file"
+  trap 'rm -f "$lock_file"' EXIT
+  git add -- '*/package.json'
+  git commit --amend --no-edit --no-verify >/dev/null
+  echo "[version-bump] amended HEAD with $bump bump"
+fi

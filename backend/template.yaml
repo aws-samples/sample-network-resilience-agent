@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Resilience Agent SSO Backend — handles AWS IAM Identity Center
+  device authorization flow for the Network Resilience Agent SPA.
+
+Parameters:
+  AllowedOrigins:
+    Type: String
+    AllowedPattern: '^https?://[^,\s*][^,\s]*(,https?://[^,\s*][^,\s]*)*$'
+    ConstraintDescription: >
+      Must be a comma-separated list of concrete http(s) origins
+      (e.g., "https://app.example.com,https://staging.example.com").
+      Wildcards are rejected — this backend returns temporary IAM
+      credentials and must only accept requests from known SPA origins.
+    Description: >
+      CORS allowed origins for the SPA. Comma-separated. Wildcards are
+      rejected. Must match the SPA's deployed origin exactly (scheme +
+      host + optional port).
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
+
+Resources:
+  SsoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda.handler
+      CodeUri: dist/
+      Description: SSO OIDC device authorization flow handler
+      Environment:
+        Variables:
+          NODE_ENV: production
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+      Events:
+        ProxyApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SsoApi
+            Path: /{proxy+}
+            Method: ANY
+        RootApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SsoApi
+            Path: /
+            Method: ANY
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2023
+        Format: esm
+        EntryPoints:
+          - src/lambda.ts
+        Banner:
+          js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);"
+
+  SsoApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins: !Split [',', !Ref AllowedOrigins]
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Requested-By
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        MaxAge: 3600
+
+  SsoFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SsoFunction}
+      RetentionInDays: 7
+
+Outputs:
+  ApiUrl:
+    Description: >
+      SSO Backend API URL — paste this into the Resilience Agent app
+      when using SSO authentication.
+    Value: !Sub https://${SsoApi}.execute-api.${AWS::Region}.amazonaws.com
