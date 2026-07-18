@@ -2,6 +2,8 @@
 // Override any value via VITE_* environment variables (or .env file).
 // See .env.example for available options.
 
+import type { MockScenario } from './shared';
+
 export const config = {
   /** Bedrock model ID (without cross-region prefix). */
   bedrockModelId: import.meta.env.VITE_BEDROCK_MODEL_ID || 'global.anthropic.claude-opus-4-7',
@@ -13,8 +15,7 @@ export const config = {
   maxToolRounds: Number(import.meta.env.VITE_MAX_TOOL_ROUNDS) || 5,
 
   /** Default mock scenario shown on first load. */
-  defaultScenario: (import.meta.env.VITE_DEFAULT_SCENARIO || 'noResiliency') as
-    'noResiliency' | 'devTest' | 'high' | 'maximum' | 'crossAccount',
+  defaultScenario: (import.meta.env.VITE_DEFAULT_SCENARIO || 'noResiliency') as MockScenario,
 
   /** App title shown in the top bar. */
   appTitle: import.meta.env.VITE_APP_TITLE || 'Network Resilience Agent',

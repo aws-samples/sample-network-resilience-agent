@@ -309,6 +309,13 @@ export function analyzeTopology(
 ): CombinedAssessment {
   const topLevel = determineResiliencyLevel(topology);
 
+  // Zero DX footprint — tiers don't apply. Same signal EmptyStateBanner uses
+  // for its "No Direct Connect resources found" card.
+  const dxNotInUse =
+    topology.connections.length === 0 &&
+    topology.virtualInterfaces.length === 0 &&
+    topology.dxGateways.length === 0;
+
   // Targets can be passed per-DXGW (record) or as a single fallback scalar
   // (older callers and tests). Each DXGW resolves its own effective target
   // in the loop below, auto-escalating past tiers the gateway already meets.
@@ -816,6 +823,7 @@ export function analyzeTopology(
   const aggregateBestPracticeRecs = [...perDxgwBestPracticeRecs, ...perVgwBestPracticeRecs, ...globalBestPracticeRecs];
 
   return {
+    dxNotInUse,
     perDxGateway,
     perVgw,
     publicVif,

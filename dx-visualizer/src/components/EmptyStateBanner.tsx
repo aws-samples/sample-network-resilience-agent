@@ -46,8 +46,12 @@ export function EmptyStateBanner({ welcomeDismissed = false }: { welcomeDismisse
   // Render for the DX-less live account OR a dismissed-welcome DX-less demo.
   if ((!signedIn && !mockNoDx) || !topologyData || hasDx) return null;
 
+  const hasVpn =
+    topologyData.vpnConnections.length > 0 ||
+    topologyData.vpnGateways.length > 0 ||
+    topologyData.customerGateways.length > 0;
   const hasOtherResources =
-    topologyData.vpcs.length > 0 || topologyData.transitGateways.length > 0;
+    topologyData.vpcs.length > 0 || topologyData.transitGateways.length > 0 || hasVpn;
 
   return (
     <div
@@ -98,10 +102,11 @@ export function EmptyStateBanner({ welcomeDismissed = false }: { welcomeDismisse
           No Direct Connect resources found
         </h2>
         <p className={`text-xs leading-relaxed ${light ? 'text-slate-500' : 'text-slate-400'}`}>
-          This account has no DX connections, virtual interfaces, or DX gateways
-          {hasOtherResources
-            ? ' — any discovered VPCs and Transit Gateways are shown on the canvas, grouped by region. Resources with no attachments appear in the Unattached resources zone.'
-            : '.'}
+          {hasVpn
+            ? 'This account connects via Site-to-Site VPN — your VPN connections, Transit Gateways, and VPCs are shown on the canvas, grouped by region. Resources with no attachments appear in the Unattached resources zone.'
+            : hasOtherResources
+              ? 'This account has no DX connections, virtual interfaces, or DX gateways — any discovered VPCs and Transit Gateways are shown on the canvas, grouped by region. Resources with no attachments appear in the Unattached resources zone.'
+              : 'This account has no DX connections, virtual interfaces, or DX gateways.'}
         </p>
         <p className={`text-[11px] mt-2.5 ${light ? 'text-slate-400' : 'text-slate-500'}`}>
           Sign in to a networking account, or pick a demo scenario from the top bar

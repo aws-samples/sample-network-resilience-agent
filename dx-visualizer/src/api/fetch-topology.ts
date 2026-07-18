@@ -13,7 +13,7 @@ import {
   fetchLocations,
   fetchLags,
 } from './direct-connect';
-import { fetchVpcs, fetchVpnGateways, fetchTransitGateways, fetchTransitGatewayAttachments, fetchTransitGatewayPeeringAttachments, fetchVpcPeeringConnections, fetchVpnConnections, fetchCustomerGateways, fetchTgwRouteTablesWithRoutes, fetchVpcRouteTables } from './ec2';
+import { fetchVpcs, fetchVpnGateways, fetchTransitGateways, fetchTransitGatewayAttachments, fetchTransitGatewayPeeringAttachments, fetchVpcPeeringConnections, fetchVpnConnections, fetchCustomerGateways, fetchTgwRouteTablesWithRoutes, fetchVpcRouteTables, fetchEnabledRegions } from './ec2';
 import { assumeRoleInAccount } from './organizations';
 import { fetchBgpPrefixMetrics } from './cloudwatch-dx';
 import { fetchDxMaintenanceEvents } from './health-dx';
@@ -91,7 +91,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
   };
 
   // Run DX GW associations, Cloud WAN routes, AND default region fetch all in parallel
-  const [dxGatewayAssociations, cloudWanRoutes, defaultRegionResult] = await Promise.all([
+  const [dxGatewayAssociations, cloudWanRoutes, defaultRegionResult, enabledRegions] = await Promise.all([
     // DX Gateway associations (fan out per gateway, already parallel)
     Promise.all(
       dxGateways.map((g) =>
@@ -106,10 +106,16 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
       : Promise.resolve(new Map() as TopologyData['cloudWanRoutes']),
     // Default region starts immediately — no waiting for region discovery
     fetchRegion(creds.region),
+    // All enabled regions — non-DX estates (VPN/TGW/VPC) have no DXGW or
+    // Cloud WAN breadcrumbs to discover other regions from, so sweep every
+    // enabled region. Denied ec2:DescribeRegions degrades to [] via logged(),
+    // falling back to the DX/Cloud-WAN-seeded discovery below.
+    logged('EnabledRegions', fetchEnabledRegions(createEc2Client(creds)), fetchErrors),
   ]);
 
   // --- Phase 3: Discover additional regions and fetch them ---
   const discoveredRegions = new Set<string>();
+  for (const r of enabledRegions) discoveredRegions.add(r);
   for (const assoc of dxGatewayAssociations) {
     if (assoc.associatedGateway.region) {
       discoveredRegions.add(assoc.associatedGateway.region);
@@ -367,7 +373,10 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
 
         // Fetch VPCs, TGWs, and TGW attachments from all discovered regions in parallel
         // (including the home/default region, which was removed from discoveredRegions
-        //  at line 113 — spoke VPCs there still need name/CIDR enrichment)
+        //  at line 113 — spoke VPCs there still need name/CIDR enrichment).
+        // discoveredRegions now spans all enabled regions (DescribeRegions sweep),
+        // so this fans out N spoke accounts × ~17 regions × 4+ calls — all parallel,
+        // all read-only, failures degrade to [] per call.
         const regionData = await Promise.all(
           [creds.region, ...discoveredRegions].map(async (region) => {
             const spokeEc2 = createEc2Client({ ...spokeCreds, region });

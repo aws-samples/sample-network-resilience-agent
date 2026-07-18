@@ -22,6 +22,7 @@ export default function App() {
   const credentials = useTopologyStore((s) => s.credentials);
   const setCredentials = useTopologyStore((s) => s.setCredentials);
   const clearChat = useTopologyStore((s) => s.clearChat);
+  const resetTopology = useTopologyStore((s) => s.resetTopology);
   const isLocked = useTopologyStore((s) => s.isLocked);
   const importedSnapshot = useTopologyStore((s) => s.importedSnapshot);
   const clearImportedSnapshot = useTopologyStore((s) => s.clearImportedSnapshot);
@@ -34,15 +35,16 @@ export default function App() {
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const isDragging = useRef(false);
   const rafId = useRef(0);
-  const loadTopologyRef = useRef(loadTopology);
-  loadTopologyRef.current = loadTopology;
   const tourRef = useRef<GuidedTourHandle>(null);
 
   const { isWarning, secondsLeft } = useSessionTimeout(!!credentials, () => {
     setCredentials(null);
     clearChat();
     setSessionExpired(true);
-    loadTopologyRef.current();
+    // Reset to the blank cold-start canvas rather than reloading the mock
+    // demo — an idle timeout should leave the SA looking at an empty canvas
+    // behind the reconnect prompt, not silently swap in demo data.
+    resetTopology();
   });
 
   useUnloadCleaner(!!credentials, clearChat);
@@ -59,8 +61,9 @@ export default function App() {
 
   // Cold start renders an empty canvas behind the welcome banner — the user
   // must pick "Connect AWS" or "Use demo data" before any topology loads.
-  // Sign-out and session timeout still call loadTopology() explicitly to
-  // restore the mock view without forcing the user back through the banner.
+  // Sign-out and session timeout call resetTopology() to return to that same
+  // blank state behind the reconnect prompt, rather than silently reloading
+  // the mock demo scenario.
 
   const handleMouseDown = () => {
     isDragging.current = true;
@@ -192,7 +195,7 @@ export default function App() {
               <div className={`absolute inset-0 z-20 flex items-center justify-center ${light ? 'bg-gray-200/80' : 'bg-slate-900/80'}`}>
                 <div className="flex flex-col items-center gap-2">
                   <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                  <span className={`text-xs ${light ? 'text-slate-500' : 'text-slate-400'}`}>Connecting to AWS...</span>
+                  <span className={`text-xs ${light ? 'text-slate-500' : 'text-slate-400'}`}>Connecting to AWS — scanning enabled regions...</span>
                 </div>
               </div>
             )}

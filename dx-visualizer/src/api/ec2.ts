@@ -11,6 +11,7 @@ import {
   DescribeTransitGatewayRouteTablesCommand,
   SearchTransitGatewayRoutesCommand,
   DescribeRouteTablesCommand,
+  DescribeRegionsCommand,
 } from '@aws-sdk/client-ec2';
 import type { Vpc, VpnGateway, VpnConnection, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpcPeeringConnection, CustomerGateway, TgwRouteTable, TgwRoute, TgwRouteTableWithRoutes, VpcRouteTable, VpcRoute } from '../types/aws-resources';
 
@@ -20,6 +21,13 @@ function tagsToRecord(tags: { Key?: string; Value?: string }[] | undefined): Rec
     if (t.Key) result[t.Key] = t.Value ?? '';
   }
   return result;
+}
+
+export async function fetchEnabledRegions(client: EC2Client): Promise<string[]> {
+  // AllRegions defaults to false — returns only regions enabled for this
+  // account, so the multi-region sweep never touches opted-out regions.
+  const res = await client.send(new DescribeRegionsCommand({}));
+  return (res.Regions ?? []).map((r) => r.RegionName ?? '').filter(Boolean);
 }
 
 export async function fetchVpcs(client: EC2Client, region: string): Promise<Vpc[]> {
