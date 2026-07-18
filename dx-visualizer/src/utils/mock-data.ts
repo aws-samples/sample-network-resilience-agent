@@ -1,7 +1,8 @@
 import type { TopologyData } from '../types/topology';
 import type { TgwRouteTableWithRoutes, VpcRouteTable } from '../types/aws-resources';
+import type { MockScenario } from './shared';
 
-function mockRoutesForTgw(tgwId: string, vpcCidrs: string[], attachmentIds: string[]): TgwRouteTableWithRoutes[] {
+export function mockRoutesForTgw(tgwId: string, vpcCidrs: string[], attachmentIds: string[]): TgwRouteTableWithRoutes[] {
   return [{
     routeTable: {
       transitGatewayRouteTableId: `tgw-rtb-${tgwId.slice(-6)}`,
@@ -1501,7 +1502,7 @@ export const crossAccountTopology: TopologyData = {
   cloudWanRoutes: new Map(),
 };
 
-export type MockScenario = 'noResiliency' | 'devTest' | 'high' | 'maximum' | 'crossAccount';
+export type { MockScenario } from './shared';
 
 export function getMockTopology(scenario: MockScenario = 'noResiliency'): TopologyData {
   switch (scenario) {

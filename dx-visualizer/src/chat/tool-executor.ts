@@ -122,6 +122,7 @@ function handleGetTopologySummary(): ToolResult {
   if (assessment) {
     summary.resiliency = {
       currentLevel: assessment.resiliency.currentLevel,
+      dxNotInUse: assessment.dxNotInUse,
       targetLevel: assessment.resiliency.targetLevel,
       recommendationCount: assessment.resiliency.recommendations.length,
       recommendations: assessment.resiliency.recommendations.map((r) => ({

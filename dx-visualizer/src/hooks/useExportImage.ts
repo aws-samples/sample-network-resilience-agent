@@ -122,17 +122,18 @@ export function useExportImage() {
     // height was already measured with the button present — leaving an empty band
     // below the content inside the card border. Hiding here forces the card to
     // reflow to its true collapsed height first, so the border wraps tightly.
-    // Also let the card's fill wrapper hug that content. Scoped to [data-node-card]
-    // (BaseNode leaf cards) so container nodes (regions, AWS cloud, VPC groups) are
-    // untouched; items-center keeps the card centered on the node's original
-    // center so edge/handle anchors don't move.
+    // The [data-node-card] wrapper (height:100% + items-center) then re-centers
+    // the shrunk card inside the node's fixed layout box, keeping the side
+    // handles on the box's center line — where React Flow already drew the edge
+    // endpoints. Do NOT collapse that wrapper (e.g. height:auto): its parent
+    // .react-flow__node is a plain block, so the card would top-align and every
+    // edge would detach from its handle by half the freed height.
     const hideSelectors = [...HIDDEN_EXPORT_TITLES]
       .map((t) => `[title="${t}"]`)
       .join(', ');
     const exportStyle = document.createElement('style');
     exportStyle.textContent = `
       ${hideSelectors} { display: none !important; }
-      .react-flow__node > [data-node-card] { height: auto !important; align-self: center; }
     `;
     document.head.appendChild(exportStyle);
     // Force a synchronous reflow so the cards collapse before html-to-image

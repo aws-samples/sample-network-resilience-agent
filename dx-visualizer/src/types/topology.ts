@@ -234,6 +234,11 @@ export type DxEdge = Edge & {
     // highlights only the single edge + its two endpoints, not a full E2E BFS
     // path — a peering is a point-to-point relationship, not an upstream path.
     isPeering?: boolean;
+    // For VPC↔VPC peering edges: whether both endpoints sit in the SAME region
+    // ('intra') or different regions ('cross'). Drives lane routing — intra
+    // peerings stay inside their region box with a fixed lane offset; cross
+    // peerings route outside the region (but inside AWS) via the existing scan.
+    peeringScope?: 'intra' | 'cross';
     aggregatedVifs?: AggregatedVifInfo[];
     // Parallel-edge bowing: when several edges connect the SAME two nodes (e.g.
     // the customer-gateway → LAG member links), each shares one source/target

@@ -75,6 +75,7 @@ function buildChecklist(
   topology: TopologyData | null,
   recommendations: Recommendation[],
   light: boolean,
+  opts?: { dxNotInUse?: boolean },
 ): {
   coverageChecklist: ChecklistItem[];
   bestPracticeChecklist: ChecklistItem[];
@@ -93,17 +94,31 @@ function buildChecklist(
   // Labels use consistent noun-based phrasing ("X redundancy") so pass and
   // fail rows scan the same way down the column — the row color and checkmark
   // communicate met/unmet, the label names the check itself.
-  const coverageChecklist: ChecklistItem[] = [
-    {
-      label: 'Location redundancy',
-      met: locCount >= 2,
-      detail: locCount >= 2
-        ? `${locCount} DX locations — outage at one still leaves the other available`
-        : locCount === 1
-          ? 'Only 1 location — a facility-wide outage would cut all Direct Connect paths'
-          : 'No Direct Connect locations detected',
-    },
-  ];
+  //
+  // Zero DX footprint: "no locations / no connections" aren't failed checks,
+  // they're a statement that DX tiering doesn't apply. One info row (excluded
+  // from the unmet count) replaces the two unmet redundancy rows; the
+  // 'none'-level progression options below double as getting-started guidance.
+  const coverageChecklist: ChecklistItem[] = opts?.dxNotInUse
+    ? [
+        {
+          label: 'Direct Connect not in use',
+          met: false,
+          severity: 'info',
+          detail: 'This account has no Direct Connect connections, virtual interfaces, or DX gateways. DX SLA tiers do not apply — VPN and Transit Gateway posture is assessed under Best Practices.',
+        },
+      ]
+    : [
+        {
+          label: 'Location redundancy',
+          met: locCount >= 2,
+          detail: locCount >= 2
+            ? `${locCount} DX locations — outage at one still leaves the other available`
+            : locCount === 1
+              ? 'Only 1 location — a facility-wide outage would cut all Direct Connect paths'
+              : 'No Direct Connect locations detected',
+        },
+      ];
 
   // Device redundancy in the AWS SLA sense requires 2+ locations AND 2+ conns
   // at each. Same-site device redundancy (1 location × 2 conns) technically
@@ -111,7 +126,9 @@ function buildChecklist(
   // still covered only by the Single Connection 95% SLA per Connection.
   // Marking it ✅ here misleads users into thinking they've cleared the check
   // when the score card still shows DEV/TEST.
-  if (locCount === 0) {
+  if (opts?.dxNotInUse) {
+    // No device-redundancy row — the single info row above covers the zero-DX case.
+  } else if (locCount === 0) {
     coverageChecklist.push({
       label: 'Device redundancy',
       met: false,
@@ -555,6 +572,8 @@ function TierProgressionStrip({
   onSelectOption,
   activeOptionLevel,
   hideCurrentTier,
+  neutralCurrentLabel,
+  optionsHeading,
 }: {
   progression: TierProgression;
   light: boolean;
@@ -563,9 +582,14 @@ function TierProgressionStrip({
   // When the parent card already shows the current tier pill (e.g. per-DXGW
   // headers), suppress the "SLA Tier — <level>" row here to avoid duplication.
   hideCurrentTier?: boolean;
+  // Zero-DX accounts: show a gray informational pill with this label instead
+  // of the red 'No Resiliency' failure pill (no SLA figure either).
+  neutralCurrentLabel?: string;
+  // Override the options heading (e.g. 'Getting started with Direct Connect').
+  optionsHeading?: string;
 }) {
   const { currentLevel, options } = progression;
-  const currentColor = tierColors[currentLevel] ?? '#6b7280';
+  const currentColor = neutralCurrentLabel ? '#6b7280' : (tierColors[currentLevel] ?? '#6b7280');
 
   return (
     <div className={`rounded-lg border px-3.5 py-3 ${light ? 'bg-gray-50 border-gray-200' : 'bg-slate-700/40 border-slate-600/50'}`}>
@@ -588,9 +612,9 @@ function TierProgressionStrip({
                 style={{ backgroundColor: currentColor }}
                 aria-hidden="true"
               />
-              {tierLabels[currentLevel]}
+              {neutralCurrentLabel ?? tierLabels[currentLevel]}
             </span>
-            {tierSla[currentLevel] && (
+            {!neutralCurrentLabel && tierSla[currentLevel] && (
               <span className={`text-[11px] font-semibold tabular-nums ${light ? 'text-gray-700' : 'text-slate-200'}`}>
                 {tierSla[currentLevel]}
               </span>
@@ -602,7 +626,7 @@ function TierProgressionStrip({
       {options.length > 0 && (
         <>
           <div className={`text-[10px] font-semibold uppercase tracking-wider mb-2 ${light ? 'text-gray-500' : 'text-slate-400'}`}>
-            {options.length > 1 ? 'Next Resiliency Level Options' : 'Next step'}
+            {optionsHeading ?? (options.length > 1 ? 'Next Resiliency Level Options' : 'Next step')}
           </div>
           <div className={`grid gap-1.5 ${options.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {options.map((opt) => {
@@ -703,7 +727,8 @@ function ProtectionCoverage({ items, light, hideHeader = false }: { items: Check
                       ? { backgroundColor: '#10b981', color: '#ffffff' }
                       : {
                           backgroundColor: 'transparent',
-                          border: `1.5px solid #f59e0b`,
+                          // Info rows are statements, not warnings — gray, not amber.
+                          border: `1.5px solid ${item.severity === 'info' ? '#6b7280' : '#f59e0b'}`,
                         }
                   }
                   aria-hidden="true"
@@ -1511,7 +1536,7 @@ export function ResiliencyScoreCard() {
     ...assessment.global.resiliency.recommendations,
     ...assessment.global.bestPractice.recommendations,
   ];
-  const globalChecklist = buildChecklist(topology, globalRecs, light);
+  const globalChecklist = buildChecklist(topology, globalRecs, light, { dxNotInUse: assessment.dxNotInUse });
 
   // Combine best-practice items surfaced per-DXGW (e.g. vif-down, connection-not-available)
   // with topology-wide best practices into a single merged checklist so the UI shows
@@ -1625,7 +1650,12 @@ export function ResiliencyScoreCard() {
         <>
           {globalChecklist.tierProgression && (
             <div className={`${inFullscreen ? 'px-5 pt-4 pb-2' : 'px-4 pt-3 pb-2'}`}>
-              <TierProgressionStrip progression={globalChecklist.tierProgression} light={light} />
+              <TierProgressionStrip
+                progression={globalChecklist.tierProgression}
+                light={light}
+                neutralCurrentLabel={assessment.dxNotInUse ? 'Direct Connect not in use' : undefined}
+                optionsHeading={assessment.dxNotInUse ? 'Getting started with Direct Connect' : undefined}
+              />
             </div>
           )}
           <div className={`${inFullscreen ? 'px-5 pt-3 pb-3' : 'px-4 pt-3 pb-2'}`}>

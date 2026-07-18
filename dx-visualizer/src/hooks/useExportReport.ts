@@ -596,6 +596,36 @@ function buildHtmlReport(topology: TopologyData, assessment: CombinedAssessment,
     : (() => {
         const fallbackLevel = assessment.resiliency.currentLevel;
         const fallbackTarget = assessment.resiliency.targetLevel;
+        // Zero DX footprint: tiers don't apply, so swap the red failure
+        // posture for a neutral card and frame the upgrade options as
+        // getting-started guidance instead of remediation.
+        if (assessment.dxNotInUse) {
+          const neutral = '#6b7280';
+          const options = upgradeOptionsFor('none', stats);
+          return `
+    <section class="dxgw-section">
+      <div class="posture-card">
+        <div class="posture-flow">
+          <div class="posture-block posture-current" style="--tier-tint:${neutral}22">
+            <div class="label">Current Posture</div>
+            <div class="tier-value"><span class="tier-badge" style="background:${neutral}">Direct Connect not in use</span></div>
+            <div class="sla-value">DX SLA tiers not applicable</div>
+          </div>
+          ${options.map((opt) => {
+            const optColor = TIER_BADGE_COLOR[opt.level];
+            return `<div class="posture-block posture-option" style="--option-color:${optColor}">
+              <div class="label">Getting started with Direct Connect</div>
+              <div class="tier-value"><span class="arrow">&rarr;</span><span class="tier-badge" style="background:${optColor}">${escapeHtml(TIER_LABELS[opt.level])}</span></div>
+              <div class="sla-value"><strong style="color:var(--text)">${escapeHtml(TIER_SLA[opt.level])}</strong><br>${escapeHtml(opt.step)}</div>
+            </div>`;
+          }).join('')}
+        </div>
+        <p class="posture-summary">This account has no Direct Connect connections, virtual interfaces, or DX gateways — it connects via VPN / Transit Gateway. VPN and Transit Gateway posture is assessed under Best Practices below.</p>
+      </div>
+      <h4 class="subsection-title">Getting Started</h4>
+      ${renderImprovementSteps(stats, 'none')}
+    </section>`;
+        }
         return `
     <section class="dxgw-section">
       ${renderPostureBlock(stats, fallbackLevel, fallbackTarget)}
