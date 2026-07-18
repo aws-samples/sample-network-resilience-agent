@@ -2,6 +2,7 @@ import { useRef, useCallback, useState } from 'react';
 import { BaseEdge, getBezierPath, getSmoothStepPath, EdgeLabelRenderer, Position, useStore, useStoreApi } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
 import { COLORS } from '../utils/colors';
+import { PEERING_INTRA_OFFSET, PEERING_CROSS_CLEARANCE } from '../utils/constants';
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { useTopologyStore } from '../store/topology-store';
 import { useRedact } from '../utils/redact';
@@ -141,8 +142,16 @@ export function CustomEdge({
   // The bulge direction follows the source/target handle positions: peering-left
   // bulges LEFT (clear regions on the left), peering-right bulges RIGHT (clear
   // regions on the right). Floor of 120px keeps short peerings looking roomy.
-  let smoothstepOffset = 120;
-  if (edgeStyleKind === 'smoothstep') {
+  //
+  // EXCEPTION — intra-region VPC↔VPC peering: both endpoints live in the SAME
+  // region, so the leg must stay INSIDE that region box, not clear it. We use a
+  // small fixed offset and skip the region-clearing scan entirely. The layout
+  // engine reserves PEERING_INTRA_LANE of right-side width in the region for
+  // exactly this leg + its label. Using a constant (not the scan) is essential:
+  // a scan-derived offset would chase the widened region outward every relayout.
+  const isIntraPeering = data?.peeringScope === 'intra';
+  let smoothstepOffset = isIntraPeering ? PEERING_INTRA_OFFSET : 120;
+  if (edgeStyleKind === 'smoothstep' && !isIntraPeering) {
     const rfState = storeApi.getState();
     const nodeLookup = (rfState as unknown as { nodeLookup?: Map<string, { internals: { positionAbsolute: { x: number; y: number } }; measured?: { width?: number; height?: number }; width?: number; height?: number; type?: string; data?: { category?: string } }> }).nodeLookup;
     if (nodeLookup) {
@@ -152,7 +161,7 @@ export function CustomEdge({
       const xMax = Math.max(sourceX, targetX);
       const exitsLeft = sourcePosition === Position.Left && targetPosition === Position.Left;
       const exitsRight = sourcePosition === Position.Right && targetPosition === Position.Right;
-      const CLEARANCE = 64; // breathing room between vertical leg and region box
+      const CLEARANCE = PEERING_CROSS_CLEARANCE; // breathing room between vertical leg and region box
       for (const [, n] of nodeLookup) {
         if (n.data?.category !== 'region') continue;
         const abs = n.internals?.positionAbsolute;

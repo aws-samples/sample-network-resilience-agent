@@ -110,6 +110,12 @@ export interface LagAssessment {
 }
 
 export interface CombinedAssessment {
+  /**
+   * True when the account has zero DX footprint (no connections, VIFs, or DX
+   * gateways) — DX resiliency tiers are not applicable. `resiliency.currentLevel`
+   * stays 'none' for back-compat. Mirrors the per-DXGW isUnattached precedent.
+   */
+  dxNotInUse: boolean;
   /** Per-DXGW resilience cards. Empty when topology has no DX Gateways. */
   perDxGateway: DxGatewayAssessment[];
   /** Per-VGW resilience cards for VGWs reached over Direct Connect. Empty when none. */

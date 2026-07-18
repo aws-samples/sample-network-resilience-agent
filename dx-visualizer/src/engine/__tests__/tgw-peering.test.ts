@@ -184,6 +184,124 @@ describe('TGW cross-account peering', () => {
     expect(peeringEdges.length).toBe(1);
   });
 
+  it('keeps the Name tag on the edge when the unnamed per-side record is listed first', () => {
+    // A single intra-region peering surfaces as two per-side attachment objects;
+    // only the requester side carries the Name tag. AWS returns them in
+    // arbitrary order — here the unnamed accepter-side record comes first. The
+    // edge label must still show the Name (prefer-named dedup), not bare
+    // "TGW Peering", and must not flap based on ordering.
+    const topo = makePeeringTopology();
+    topo.transitGateways.push({
+      transitGatewayId: 'tgw-bbbb2222',
+      transitGatewayArn: 'arn:aws:ec2:ap-southeast-1:111122223333:transit-gateway/tgw-bbbb2222',
+      state: 'available',
+      ownerId: '111122223333',
+      description: 'Peer TGW',
+      amazonSideAsn: 64513,
+      tags: { Name: 'Peer-TGW' },
+    });
+    topo.transitGatewayPeeringAttachments = [
+      {
+        transitGatewayAttachmentId: 'tgw-attach-accepter',
+        requesterTgwInfo: { transitGatewayId: 'tgw-aaaa1111', region: 'ap-southeast-1', ownerId: '111122223333' },
+        accepterTgwInfo: { transitGatewayId: 'tgw-bbbb2222', region: 'ap-southeast-1', ownerId: '111122223333' },
+        state: 'available',
+        tags: {},
+      },
+      {
+        transitGatewayAttachmentId: 'tgw-attach-requester',
+        requesterTgwInfo: { transitGatewayId: 'tgw-aaaa1111', region: 'ap-southeast-1', ownerId: '111122223333' },
+        accepterTgwInfo: { transitGatewayId: 'tgw-bbbb2222', region: 'ap-southeast-1', ownerId: '111122223333' },
+        state: 'available',
+        tags: { Name: 'my-tgw-peering' },
+      },
+    ];
+
+    const { edges } = buildGraph(topo, new Set());
+    const peeringEdges = edges.filter((e) => e.data?.label?.includes('TGW Peering'));
+    expect(peeringEdges.length).toBe(1);
+    expect(peeringEdges[0].data?.label).toContain('my-tgw-peering');
+  });
+
+  // Regression: a Cloud WAN↔TGW peering must render only as the "Cloud WAN
+  // Peering" edge from the core network — never as a phantom TGW node.
+  //
+  // DescribeTransitGatewayPeeringAttachments *also* returns Cloud WAN↔TGW
+  // peerings, but the Cloud WAN side comes back with an empty TGW id (AWS has
+  // no TGW id to give for a core network). The old code only bailed on an empty
+  // region, so it synthesized a nameless, id-less "Transit Gateway" node
+  // (id `tgw-`) plus a spurious "TGW Peering" edge — a broken duplicate of the
+  // Cloud WAN peering that is already drawn correctly. This mirrors the real
+  // snapshot: core network `poc-summit-sg-cloudwan01` peered to `sin-tgw-01`.
+  function makeCloudWanTgwPeeringTopology() {
+    const topo = makePeeringTopology();
+    topo.cloudWanCoreNetworks = [
+      {
+        coreNetworkId: 'core-network-cwan1',
+        coreNetworkArn: 'arn:aws:networkmanager::111122223333:core-network/core-network-cwan1',
+        globalNetworkId: 'global-network-1',
+        description: 'poc-cloudwan01',
+        state: 'available',
+        edges: [{ edgeLocation: 'ap-southeast-1', asn: 65502, insideCidrBlocks: [] }],
+        segments: [{ name: 'Production', edgeLocations: ['ap-southeast-1'], sharedSegments: [] }],
+      },
+    ];
+    // The Cloud WAN peering record — the *correct* representation of the link.
+    topo.cloudWanPeerings = [
+      {
+        peeringId: 'peering-cwan1',
+        coreNetworkId: 'core-network-cwan1',
+        peeringType: 'TRANSIT_GATEWAY',
+        edgeLocation: 'ap-southeast-1',
+        resourceArn: 'arn:aws:ec2:ap-southeast-1:111122223333:transit-gateway/tgw-aaaa1111',
+        state: 'available',
+        tags: { Name: 'poc-cloudwan-tgw' },
+      },
+    ];
+    // The same link as it surfaces via TGW peering attachments: requester side
+    // (the core network) has an EMPTY transitGatewayId.
+    topo.transitGatewayPeeringAttachments = [
+      {
+        transitGatewayAttachmentId: 'tgw-attach-cwan',
+        requesterTgwInfo: { transitGatewayId: '', region: 'ap-southeast-1', ownerId: '111122223333' },
+        accepterTgwInfo: { transitGatewayId: 'tgw-aaaa1111', region: 'ap-southeast-1', ownerId: '111122223333' },
+        state: 'available',
+        tags: {},
+      },
+    ];
+    return topo;
+  }
+
+  it('does not synthesize a phantom TGW node for a Cloud WAN↔TGW peering (empty requester id)', () => {
+    const { nodes, edges } = buildGraph(makeCloudWanTgwPeeringTopology(), new Set());
+    // No phantom node with the empty-id `tgw-` id.
+    expect(nodes.some((n) => n.id === 'tgw-')).toBe(false);
+    // No TGW-category node with a blank/empty resourceId.
+    expect(nodes.some((n) => n.data.category === 'tgw' && !n.data.resourceId)).toBe(false);
+    // No edge anchored to the empty-id node.
+    expect(edges.some((e) => e.source === 'tgw-' || e.target === 'tgw-')).toBe(false);
+    // No spurious "TGW Peering" edge at all — this link is a Cloud WAN peering.
+    expect(edges.some((e) => e.data?.label?.includes('TGW Peering'))).toBe(false);
+  });
+
+  it('still renders the correct Cloud WAN peering edge to the real TGW', () => {
+    const { nodes, edges } = buildGraph(makeCloudWanTgwPeeringTopology(), new Set());
+    // The core network node exists.
+    expect(nodes.some((n) => n.id === 'cwan-core-network-cwan1')).toBe(true);
+    // The real TGW keeps its full identity (name/id), not a blank card.
+    const realTgw = nodes.find((n) => n.id === 'tgw-tgw-aaaa1111');
+    expect(realTgw).toBeDefined();
+    expect(realTgw!.data.resourceId).toBe('tgw-aaaa1111');
+    // The correct Cloud WAN Peering edge from core network → real TGW survives.
+    const cwanEdge = edges.find(
+      (e) => e.source === 'cwan-core-network-cwan1' && e.target === 'tgw-tgw-aaaa1111',
+    );
+    expect(cwanEdge).toBeDefined();
+    expect(cwanEdge!.data?.label).toContain('Cloud WAN Peering');
+    // And the real TGW gets a peering handle so the edge anchors visually.
+    expect(realTgw!.data.hasPeeringHandle).toBe(true);
+  });
+
   it('marks synthesized same-account peer TGW without crossAccount flag', () => {
     const topo = makePeeringTopology();
     topo.transitGatewayPeeringAttachments = [

@@ -65,29 +65,7 @@ npm run preview        # Preview production build locally
 
 ## 2. Solution Architecture
 
-```mermaid
-graph LR
-    subgraph Browser["Browser (React SPA)"]
-        direction TB
-        TB[Top Bar - View Toggle / Live Status / Simulate / Credentials]
-        subgraph Split[" "]
-            direction LR
-            Canvas["Flow Canvas ~60%<br><br>React Flow Graph<br>Failure Simulation<br>Live Status Layer<br>Resilience Status"]
-            Chat["Chat Panel ~40%<br><br>Message History<br>Tool Calls<br>Streaming Response<br>Action Buttons"]
-        end
-    end
-
-    subgraph AWS["AWS APIs (SDK v3)"]
-        direction LR
-        Discovery["Discovery<br>Direct Connect,EC2<br>Network Manager"]
-        Intelligence["Amazon Bedrock,Pricing<br>Cost Explorer"]
-    end
-
-    Canvas -->|Fetch topology| Discovery
-    Chat -->|ConverseStream + tools| Intelligence
-    Discovery -->|Resource data| Canvas
-    Intelligence -->|Streamed responses| Chat
-```
+![Network Resilience Agent — Solution Architecture](docs/images/NWRA_Arch_Diagram.png)
 
 ### 2.1 Technology Stack
 

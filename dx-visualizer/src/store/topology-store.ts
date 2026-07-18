@@ -3,7 +3,7 @@ import type { DxNode, DxEdge, TopologyData, ViewMode } from '../types/topology';
 import type { CombinedAssessment } from '../types/recommendations';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
 import type { AwsCredentials } from '../types/aws-resources';
-import { WELCOME_MESSAGE } from '../utils/shared';
+import { WELCOME_MESSAGE, type MockScenario } from '../utils/shared';
 import { config } from '../utils/config';
 import { fetchUtilization } from '../api/cloudwatch-utilization';
 import { deserializeTopologyData, type SnapshotFile } from '../utils/snapshot';
@@ -30,6 +30,12 @@ interface TopologyStore {
 
   topologyData: TopologyData | null;
   setTopologyData: (data: TopologyData) => void;
+  // Clear the canvas back to the cold-start blank state (no topology, graph, or
+  // assessment). Used by sign-out and session-timeout so the signed-out canvas
+  // matches cold start — blank behind the WelcomeBanner — instead of silently
+  // reloading the mock demo scenario. No-op while an imported snapshot is
+  // pinned, mirroring loadTopology's guard so neither path clobbers it.
+  resetTopology: () => void;
 
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
@@ -80,8 +86,8 @@ interface TopologyStore {
   toggleTheme: () => void;
 
   useMock: boolean;
-  mockScenario: 'noResiliency' | 'devTest' | 'high' | 'maximum' | 'crossAccount';
-  setMockScenario: (scenario: 'noResiliency' | 'devTest' | 'high' | 'maximum' | 'crossAccount') => void;
+  mockScenario: MockScenario;
+  setMockScenario: (scenario: MockScenario) => void;
 
   updateNodePositions: (changes: { id: string; position: { x: number; y: number } }[]) => void;
 
@@ -530,6 +536,44 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
 
   topologyData: null,
   setTopologyData: (data) => set({ topologyData: data }),
+  resetTopology: () => {
+    // Guard against wiping a pinned imported snapshot — same invariant as
+    // loadTopology(). The SA must Exit the imported view explicitly.
+    if (get().importedSnapshot != null) return;
+    // Drop live-account user customizations and cached utilization so the
+    // prior session's edges/sites don't linger (in localStorage or in the
+    // graph) while signed out — mirrors the exact cleanup loadTopology()
+    // runs before every fetch.
+    get().clearUserEdges();
+    get().clearHiddenEdges();
+    get().clearEdgeReconnectOverrides();
+    get().clearUserCustomerSites();
+    get().clearHiddenCustomerSites();
+    get().resetUtilization();
+    set({
+      topologyData: null,
+      currentNodes: [],
+      currentEdges: [],
+      recommendedNodes: [],
+      recommendedEdges: [],
+      recommendedCurrentNodes: [],
+      assessment: null,
+      homeAccountName: null,
+      error: null,
+      isLoading: false,
+      // Clear any in-flight selection / simulation state so a later demo /
+      // reconnect starts clean, matching loadSnapshot's reset.
+      hoveredNodeId: null,
+      pinnedNodeId: null,
+      highlightedNodeIds: new Set(),
+      highlightedEdgeIds: new Set(),
+      spotlightNodeIds: new Set(),
+      spotlightEdgeIds: new Set(),
+      isSimulating: false,
+      failedNodeIds: new Set(),
+      failedEdgeIds: new Set(),
+    });
+  },
 
   isLoading: false,
   setIsLoading: (loading) => set({ isLoading: loading }),

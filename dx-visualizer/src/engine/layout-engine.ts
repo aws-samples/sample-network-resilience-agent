@@ -1,5 +1,5 @@
 import type { DxNode, DxEdge } from '../types/topology';
-import { NODE_DIMENSIONS } from '../utils/constants';
+import { NODE_DIMENSIONS, PEERING_INTRA_LANE, PEERING_CROSS_LANE } from '../utils/constants';
 import { ZONE_DIMS, zoneHeight } from './unattached-zone-dims';
 import { HIDDEN_ASSOC_ZONE_DIMS, hiddenAssocZoneHeight } from './hidden-assoc-zone-dims';
 
@@ -200,6 +200,22 @@ export function applyLayout(
     colMaxHeight.set(col.key, maxH);
   }
 
+  // VPN-only (no DX) escape: every column between onPremise and the region
+  // (dxPartnerDevice…coreNetwork) is empty and collapses, and onPremise itself
+  // collapses too because VPN routers are excluded from the DX leaf set (they're
+  // placed independently in Step 2.5). That leaves the region's first column
+  // (cgw/tgw) starting at x≈0 — directly on top of the Customer Data Center
+  // containers, which are also anchored at the onPremise X, so the two strips
+  // overlap. Reserve the onPremise column's node width (routers still don't
+  // *inflate* it beyond the standard width) so the region flow is pushed clear
+  // of the customer strip. Only fires when onPremise holds VPN routers and no
+  // DX leaf — a mixed DX topology already has onPremise onprem nodes.
+  if ((colMaxWidth.get('onPremise') ?? 0) === 0 && vpnNodes.length > 0) {
+    const opDim = nodeDim('onPremise');
+    colMaxWidth.set('onPremise', opDim.width);
+    colMaxHeight.set('onPremise', opDim.height);
+  }
+
   // ---- Step 2: Compute dynamic column X positions ----
   const nonEmptyWidths = [...colMaxWidth.values()].filter((w) => w > 0);
   const avgWidth = nonEmptyWidths.length > 0
@@ -284,12 +300,24 @@ export function applyLayout(
   let vpnCursorY = 0;
   const vpnOnPrems = vpnNodes.filter((n) => n.id.startsWith('onprem-vpn-'));
 
+  // A router hosted inside an existing DX Customer Data Center (details.
+  // hostSiteId set) is repositioned in Step 7b, so its stride here is
+  // irrelevant — keep the bare-node rowHeight to avoid inflating the top-strip
+  // reservation (dxStartY) for DX+VPN topologies. A standalone router (pure-VPN)
+  // gets its OWN custsite-vpn container in Step 7b: rowHeight's node-to-node gap
+  // (globalMaxH·V_GAP_RATIO) is entirely consumed by the container's PAD_TOP +
+  // PAD_BOTTOM chrome, so consecutive containers touch with zero gap. Advance by
+  // the full container height plus LOC_VISUAL_GAP (matches DX location spacing).
+  const standaloneVpnStride =
+    vpnOnPremDim.height + CONTAINER_PAD_TOP + CONTAINER_PAD_BOTTOM + LOC_VISUAL_GAP;
+
   for (const onPrem of vpnOnPrems) {
     positioned.set(onPrem.id, {
       ...onPrem,
       position: { x: vpnOnPremX + (vpnOnPremW - vpnOnPremDim.width) / 2, y: vpnCursorY },
     });
-    vpnCursorY += rowHeight;
+    const hosted = !!(onPrem.data.details as Record<string, string> | undefined)?.hostSiteId;
+    vpnCursorY += hosted ? rowHeight : standaloneVpnStride;
   }
 
   // Add gap between VPN section and DX section — scales with how far VPN edges travel
@@ -1747,6 +1775,26 @@ export function applyLayout(
     setContainer(positioned, site, bb.minX - CONTAINER_PAD_X, bb.minY - CONTAINER_PAD_TOP, w, h);
   }
 
+  // VPC↔VPC peering lane reservation. Intra-region peering edges route in a
+  // right-side lane INSIDE their region (CustomEdge uses PEERING_INTRA_OFFSET);
+  // the region must widen by PEERING_INTRA_LANE to enclose the leg + label.
+  // Cross-region peering edges route just outside the rightmost region but must
+  // still land inside AWS, so the AWS box widens by PEERING_CROSS_LANE. Scope is
+  // stamped on each edge by topology-builder from the two endpoints' regions.
+  const regionsWithIntraPeering = new Set<string>();
+  let hasCrossRegionPeering = false;
+  for (const e of edges) {
+    const scope = e.data?.peeringScope;
+    if (!scope) continue;
+    if (scope === 'intra') {
+      const src = positioned.get(e.source);
+      const region = src ? getNodeRegion(src) : '_default';
+      if (region !== '_default') regionsWithIntraPeering.add(region);
+    } else {
+      hasCrossRegionPeering = true;
+    }
+  }
+
   // ---- Step 8: Position Region containers ----
   const emptyRegionIds = new Set<string>();
   // First pass: compute each region's natural bounding box and the max width
@@ -1777,7 +1825,10 @@ export function applyLayout(
     }
 
     const bb = boundingBox(regionChildren);
-    const naturalW = bb.maxX - bb.minX + CONTAINER_PAD_X * 2;
+    // Reserve a right-side lane inside the region for intra-region VPC peering
+    // legs + labels so they stay enclosed (see Step 7.5 lane reservation).
+    const intraLane = regionsWithIntraPeering.has(regionCode) ? PEERING_INTRA_LANE : 0;
+    const naturalW = bb.maxX - bb.minX + CONTAINER_PAD_X * 2 + intraLane;
     const hasToggle = (region.data.nonDxVpcCount ?? 0) > 0;
     if (hasToggle && naturalW > maxToggleRegionW) maxToggleRegionW = naturalW;
     regionBoxes.push({ region, bb, naturalW, hasToggle });
@@ -1835,8 +1886,12 @@ export function applyLayout(
           return { top: Math.min(acc.top, y), bottom: Math.max(acc.bottom, y + h) };
         }, null);
 
+      // Cross-region VPC peering legs route just outside the rightmost region
+      // (CustomEdge's region-clearing scan) and must still land inside AWS —
+      // reserve a right-side lane so the leg + label stay enclosed.
+      const crossLane = hasCrossRegionPeering ? PEERING_CROSS_LANE : 0;
       const innerH = maxY - minY;
-      const w = maxX - minX + AWS_CLOUD_PAD_X * 2;
+      const w = maxX - minX + AWS_CLOUD_PAD_X * 2 + crossLane;
       const h = innerH + AWS_CLOUD_PAD_TOP + AWS_CLOUD_PAD_BOTTOM;
 
       let cloudTopY: number;

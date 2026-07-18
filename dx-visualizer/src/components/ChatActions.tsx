@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
-
-type MockScenario = 'noResiliency' | 'devTest' | 'high' | 'maximum' | 'crossAccount';
+import type { MockScenario } from '../utils/shared';
 
 interface ParsedAction {
   id: string;

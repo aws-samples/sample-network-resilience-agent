@@ -1,5 +1,5 @@
 import type { TopologyData, DxNode, DxEdge, DxNodeData, VpcChildInfo, VpcPeerInfo, TgwChildInfo, VgwChildInfo, DxgwChildInfo, HiddenAssocChildInfo, AggregatedVifInfo } from '../types/topology';
-import type { Vpc, TransitGateway, TransitGatewayAttachment, VpnGateway, DxGateway, VpnTunnel } from '../types/aws-resources';
+import type { Vpc, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpnGateway, DxGateway, VpnTunnel } from '../types/aws-resources';
 import { LAYOUT, REGION_NAMES } from '../utils/constants';
 import { COLORS } from '../utils/colors';
 
@@ -732,6 +732,16 @@ export function buildGraph(
     return true;
   }
 
+  // TGW→VPC attachments whose edge was suppressed because the VPC sits off the
+  // DX path (region "Show non DXGW association nodes" toggle is off). We hide
+  // these edges to keep the canvas focused on the DX story — but a suppressed
+  // VPC can still land on the canvas for an unrelated reason (e.g. it's the
+  // endpoint of a rendered VPC peering). When that happens, a visible VPC with
+  // no line to its visible TGW reads as "attachment missing", which is wrong.
+  // We record the suppressed pairs here and, in a post-pass after all node
+  // synthesis, draw the attachment edge for any pair whose BOTH endpoints ended
+  // up on the canvas.
+  const suppressedTgwVpcEdges: { tgwId: string; vpcId: string; region: string }[] = [];
   // Collect isolated TGWs per region — rendered after the region loop so their
   // group node doesn't confuse the per-DXGW rendering paths.
   const isolatedTgwsByRegion = new Map<string, TransitGateway[]>();
@@ -1025,13 +1035,21 @@ export function buildGraph(
               edges.push(makeEdge(tgwId, vpcId));
               connectedVpcIds.add(vpc.vpcId);
             }
+          } else {
+            // Non-DX VPCs hidden by the region toggle: record the suppressed
+            // pair so the post-pass can restore the edge if the VPC lands on
+            // the canvas anyway (e.g. as a VPC-peering endpoint).
+            for (const vpc of tgwVpcs) suppressedTgwVpcEdges.push({ tgwId, vpcId: `vpc-${vpc.vpcId}`, region });
           }
 
           // Cross-account VPCs from TGW attachments (not in topology.vpcs).
           // When hidden (collapsed group or non-DX subtree), mark connected so
           // they don't spill into the Unattached zone.
           if (collapseVpcs || hideNonDxVpcs) {
-            for (const att of crossAccountVpcAtts) connectedVpcIds.add(att.resourceId);
+            for (const att of crossAccountVpcAtts) {
+              connectedVpcIds.add(att.resourceId);
+              if (hideNonDxVpcs) suppressedTgwVpcEdges.push({ tgwId, vpcId: `vpc-${att.resourceId}`, region });
+            }
           } else for (const att of crossAccountVpcAtts) {
             const vpcId = `vpc-${att.resourceId}`;
             if (!nodeIds.has( vpcId)) {
@@ -1116,10 +1134,12 @@ export function buildGraph(
 
       // Non-DX VGW = no DXGW association, no VPN attached, no VIF pointing at
       // it. Its VPCs are off-DX-path; hide VGW and VPCs unless the user has
-      // opted in to showing non-DX in this region.
+      // opted in to showing non-DX in this region. In a DX-less topology
+      // everything is on-path (mirrors the ungrouped-TGW escape above), so
+      // the suppression only applies when there's a DX story to focus on.
       const vgwIsNonDx = !assoc && !vpnVgwIds.has(vgw.vpnGatewayId) && !vifVgwIds.has(vgw.vpnGatewayId);
       handledGatewayIds.add(vgw.vpnGatewayId);
-      if (vgwIsNonDx) {
+      if (vgwIsNonDx && hasDxPresence) {
         const attachedVpcIds = vgw.vpcAttachments
           .filter((a) => a.state === 'attached')
           .map((a) => a.vpcId);
@@ -1418,6 +1438,11 @@ export function buildGraph(
     region: string,
     ownerId: string,
   ): boolean {
+    // Cloud WAN↔TGW peerings surface here too, but the Cloud WAN side has no
+    // TGW id (AWS returns an empty string). That side is already drawn as a
+    // "Cloud WAN Peering" edge from the core network node, so bail rather than
+    // synthesizing a nameless, id-less phantom TGW node for it.
+    if (!transitGatewayId) return false;
     const nodeId = `tgw-${transitGatewayId}`;
     if (nodeIds.has(nodeId)) return true;
     if (!region) return false;
@@ -1444,12 +1469,22 @@ export function buildGraph(
     return true;
   }
 
-  const processedPeerings = new Set<string>();
+  // One logical TGW peering surfaces as two per-side attachment objects (one on
+  // each TGW) with distinct attachment IDs but identical requester/accepter
+  // info. Only the requester-side object carries the Name tag, and AWS returns
+  // the two in arbitrary order — so collapse by unordered TGW pair, and when a
+  // pair has both a named and an unnamed record prefer the named one. A naive
+  // first-wins dedup would render a bare "TGW Peering" (dropping the Name) and
+  // could even flap between refreshes as fetch ordering changes.
+  const peeringByPair = new Map<string, TransitGatewayPeeringAttachment>();
   for (const peering of topology.transitGatewayPeeringAttachments) {
     const pairKey = [peering.requesterTgwInfo.transitGatewayId, peering.accepterTgwInfo.transitGatewayId].sort().join('|');
-    if (processedPeerings.has(pairKey)) continue;
-    processedPeerings.add(pairKey);
-
+    const existing = peeringByPair.get(pairKey);
+    if (!existing || (!existing.tags.Name && peering.tags.Name)) {
+      peeringByPair.set(pairKey, peering);
+    }
+  }
+  for (const peering of peeringByPair.values()) {
     const reqOk = ensurePeerTgwNode(
       peering.requesterTgwInfo.transitGatewayId,
       peering.requesterTgwInfo.region,
@@ -1579,6 +1614,11 @@ export function buildGraph(
     labelParts.push(peering.vpcPeeringConnectionId);
     if (peering.state) labelParts.push(`State: ${peering.state}`);
 
+    // Same-region peering stays inside the region box (fixed lane); cross-region
+    // routes outside the region but inside AWS. Both sides always carry a region.
+    const peeringScope: 'intra' | 'cross' =
+      peering.requesterVpc.region === peering.accepterVpc.region ? 'intra' : 'cross';
+
     const edgeId = `e-vpcpeer-${peering.vpcPeeringConnectionId}`;
     edges.push({
       ...makeEdge(reqNodeId, accNodeId, {
@@ -1588,6 +1628,7 @@ export function buildGraph(
         edgeStyle: 'smoothstep',
         connectionState: peering.state,
         isPeering: true,
+        peeringScope,
       }),
       id: edgeId,
     });
@@ -1625,6 +1666,33 @@ export function buildGraph(
     if (!node) continue;
     peers.sort((a, b) => a.peerRegion.localeCompare(b.peerRegion) || a.peerName.localeCompare(b.peerName));
     node.data.vpcPeers = peers;
+  }
+
+  // Restore suppressed TGW→VPC attachment edges when BOTH endpoints ended up on
+  // the canvas anyway. A non-DX VPC hidden by the region toggle can still be
+  // rendered as a VPC-peering endpoint; leaving its TGW attachment edge out
+  // would make a visible, genuinely-attached VPC look unattached. Runs after all
+  // node synthesis so nodeIds reflects the final node set. Deduped against edges
+  // already present (source+target) to avoid React Flow key collisions.
+  const existingEdgePairs = new Set(edges.map((e) => `${e.source}|${e.target}`));
+  // Count badge is per-VPC-node (bumped once even for a VPC on multiple TGWs),
+  // so decrement at most once per unique VPC to avoid under-reporting.
+  const uncountedVpcs = new Set<string>();
+  for (const { tgwId, vpcId, region } of suppressedTgwVpcEdges) {
+    if (!nodeIds.has(tgwId) || !nodeIds.has(vpcId)) continue;
+    if (existingEdgePairs.has(`${tgwId}|${vpcId}`) || existingEdgePairs.has(`${vpcId}|${tgwId}`)) continue;
+    existingEdgePairs.add(`${tgwId}|${vpcId}`);
+    edges.push(makeEdge(tgwId, vpcId));
+    // This VPC is now visible AND wired to its TGW, so it's no longer part of
+    // the region's hidden non-DX count. Decrement the badge (already stamped
+    // above) so "Show non DXGW association nodes (N)" stays truthful.
+    const countKey = `${region}|${vpcId}`;
+    if (uncountedVpcs.has(countKey)) continue;
+    uncountedVpcs.add(countKey);
+    const regionNode = regionNodesByCode.get(region);
+    if (regionNode && regionNode.data.nonDxVpcCount) {
+      regionNode.data.nonDxVpcCount = Math.max(0, regionNode.data.nonDxVpcCount - 1);
+    }
   }
 
   // --- Unattached resources: aggregate orphan VPCs + isolated TGWs across

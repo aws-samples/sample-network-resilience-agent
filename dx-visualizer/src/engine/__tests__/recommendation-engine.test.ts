@@ -6,6 +6,26 @@ describe('analyzeTopology', () => {
   it('returns "none" resiliency level for empty topology', () => {
     const result = analyzeTopology(makeEmptyTopology());
     expect(result.resiliency.currentLevel).toBe('none');
+    // Zero DX footprint — tiers don't apply; the level stays 'none' for back-compat
+    expect(result.dxNotInUse).toBe(true);
+  });
+
+  it('dxNotInUse is false when a connection exists', () => {
+    const t = makeEmptyTopology();
+    t.connections = [
+      { connectionId: 'c1', location: 'EqDC2', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
+    ];
+    expect(analyzeTopology(t).dxNotInUse).toBe(false);
+  });
+
+  it('dxNotInUse is false for a DXGW-only topology (no connections or VIFs)', () => {
+    const t = makeEmptyTopology();
+    t.dxGateways = [
+      { directConnectGatewayId: 'dxgw-1', directConnectGatewayName: 'gw', amazonSideAsn: 64512, ownerAccount: '123456789012', directConnectGatewayState: 'available' } as any,
+    ];
+    const result = analyzeTopology(t);
+    expect(result.dxNotInUse).toBe(false);
+    expect(result.resiliency.currentLevel).toBe('none');
   });
 
   it('returns "devtest" for single connection at one location (AWS Single Connection SLA — 95%)', () => {

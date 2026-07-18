@@ -57,23 +57,45 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
 
   // Resolve a raw AWS resource ID (dxcon-*, dxvif-*, dxgw-*) to either a graph
   // node ID or an edge ID so hovering the chip can spotlight the matching
-  // element on the canvas.
-  //  - dxgw-*: node IDs are `dxgw-${id}` verbatim → node spotlight
-  //  - dxcon-*: no dedicated node — spotlight the AWS device terminating that
-  //    connection (carries `resourceId === connectionId`) → node spotlight
-  //  - dxvif-*: VIFs live on edges — spotlight the edge itself, not the DXGW
-  //    it terminates on, so the user is pointed at the actual maintenance target
+  // element on the canvas. Both the maintenance target and the visual element
+  // must line up exactly — a wrong highlight is worse than no highlight, so we
+  // match on the ID's own prefix rather than a generic node/edge scan.
+  //  - dxvif-*: VIFs live on edges — spotlight the edge itself (the actual
+  //    maintenance target), not the DXGW/device it terminates on. Falls back to
+  //    the aggregated "N VIFs" edge that folded this VIF in.
+  //  - dxcon-*: the DX Connection is the EDGE between the Customer/Partner
+  //    Device and the AWS logical device. Spotlight that edge — NOT either
+  //    endpoint node. Both the partner device (customer gateway) and the AWS
+  //    device carry `resourceId === connectionId`, so a node scan would light up
+  //    the customer gateway, which is not the connection. Falls back to the AWS
+  //    device only when the connection edge isn't in the current view (e.g. the
+  //    partner devices collapsed into a group).
+  //  - dxgw-* / other: resolve to the node whose id or resourceId matches.
   const resolveSpotlight = useCallback((resourceId: string): SpotlightTarget | null => {
-    const byNode = currentNodes.find((n) => n.id === resourceId || n.data?.resourceId === resourceId);
-    if (byNode) return { kind: 'node', id: byNode.id };
     if (resourceId.startsWith('dxvif-')) {
       const byEdge = currentEdges.find((e) => e.data?.vifId === resourceId);
       if (byEdge) return { kind: 'edge', id: byEdge.id };
+      // The VIF may have been folded into an aggregated "N VIFs" edge whose own
+      // vifId is a synthetic "N-vifs" marker — match the individual members.
+      const byAgg = currentEdges.find((e) =>
+        e.data?.aggregatedVifs?.some((v) => v.vifId === resourceId),
+      );
+      if (byAgg) return { kind: 'edge', id: byAgg.id };
+      return null;
     }
-    const byEdge = currentEdges.find(
-      (e) => e.data?.connectionId === resourceId || e.data?.vifId === resourceId,
-    );
-    if (byEdge) return { kind: 'node', id: byEdge.target };
+    if (resourceId.startsWith('dxcon-')) {
+      const byEdge = currentEdges.find((e) => e.data?.connectionId === resourceId);
+      if (byEdge) return { kind: 'edge', id: byEdge.id };
+      // Connection edge not rendered (collapsed partner group) — point at the
+      // AWS device terminating the connection, the AWS-side maintenance target.
+      const awsDev = currentNodes.find(
+        (n) => n.data?.category === 'awsDevice' && n.data?.resourceId === resourceId,
+      );
+      if (awsDev) return { kind: 'node', id: awsDev.id };
+      return null;
+    }
+    const byNode = currentNodes.find((n) => n.id === resourceId || n.data?.resourceId === resourceId);
+    if (byNode) return { kind: 'node', id: byNode.id };
     return null;
   }, [currentNodes, currentEdges]);
 
@@ -480,14 +502,23 @@ function MaintenanceDetail({
     header = split.header;
     body = split.body;
   } else {
+    // Affected resources get their own chip section below, so we omit them
+    // here to avoid rendering the same IDs twice (once as plain text, once as
+    // interactive chips).
     body = [
       `Event type: ${e.eventTypeCode || 'unknown'}`,
       `Region: ${e.region || 'unknown'}`,
       e.startTime ? `Start: ${e.startTime}` : null,
       e.endTime ? `End: ${e.endTime}` : null,
-      e.affectedResourceIds.length ? `Affected: ${e.affectedResourceIds.join(', ')}` : null,
     ].filter(Boolean).join('\n');
   }
+
+  // AWS's PHD description text does NOT list the affected dxcon-*/dxvif-* IDs
+  // inline (only the notification email and the console's "Affected resources"
+  // tab do), so scanning the body alone leaves the user unable to tell which
+  // connections/VIFs the maintenance hits. Surface affectedResourceIds — which
+  // we already have from DescribeAffectedEntities — as their own chip section.
+  const affectedIds = Array.from(new Set(e.affectedResourceIds ?? []));
 
   const extraCount = group.sources.length - 1;
 
@@ -505,6 +536,25 @@ function MaintenanceDetail({
       >
         {renderBodyWithResourceChips(body, resolveSpotlight, setSpotlightNode, setSpotlightEdge, light)}
       </div>
+      {affectedIds.length > 0 && (
+        <div className="space-y-1 pt-2">
+          <div className={`text-[11px] font-semibold ${light ? 'text-gray-800' : 'text-slate-100'}`}>
+            Affected resources
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {affectedIds.map((id) => (
+              <ResourceChip
+                key={id}
+                resourceId={id}
+                target={resolveSpotlight(id)}
+                light={light}
+                setSpotlightNode={setSpotlightNode}
+                setSpotlightEdge={setSpotlightEdge}
+              />
+            ))}
+          </div>
+        </div>
+      )}
       {extraCount > 0 && (
         <details className="group">
           <summary

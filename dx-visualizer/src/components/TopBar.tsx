@@ -40,6 +40,7 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
   const currentEdges = useTopologyStore((s) => s.currentEdges);
   const credentials = useTopologyStore((s) => s.credentials);
   const setCredentials = useTopologyStore((s) => s.setCredentials);
+  const resetTopology = useTopologyStore((s) => s.resetTopology);
   const clearChat = useTopologyStore((s) => s.clearChat);
   const isLoading = useTopologyStore((s) => s.isLoading);
   const importedSnapshot = useTopologyStore((s) => s.importedSnapshot);
@@ -683,7 +684,7 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
                   </button>
                   <div className={`my-1 h-px ${light ? 'bg-gray-100' : 'bg-slate-700/60'}`} />
                   <button
-                    onClick={() => { setConnectMenuOpen(false); clearChat(); setCredentials(null); onRefresh(); }}
+                    onClick={() => { setConnectMenuOpen(false); clearChat(); setCredentials(null); resetTopology(); }}
                     className={`w-full flex items-center gap-2 text-left px-3 py-1.5 text-[11px] transition-colors ${
                       light ? 'text-red-600 hover:bg-red-50' : 'text-red-400 hover:bg-red-500/10'
                     }`}
