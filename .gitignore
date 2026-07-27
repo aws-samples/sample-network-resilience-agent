@@ -2,6 +2,7 @@
 node_modules/
 .playwright-mcp/
 *.png
+!docs/images/*.png
 dist/
 
 # CSE security scanner artifacts (auto-added by cse init)

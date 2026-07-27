@@ -1,6 +1,6 @@
 import type { TopologyData, DxNode, DxEdge, DxNodeData, VpcChildInfo, VpcPeerInfo, TgwChildInfo, VgwChildInfo, DxgwChildInfo, HiddenAssocChildInfo, AggregatedVifInfo } from '../types/topology';
 import type { Vpc, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpnGateway, DxGateway, VpnTunnel } from '../types/aws-resources';
-import { LAYOUT, REGION_NAMES } from '../utils/constants';
+import { LAYOUT, REGION_NAMES, VPC_TABLE_WIDTH, vpcTableHeight } from '../utils/constants';
 import { COLORS } from '../utils/colors';
 
 /** Build VPC node details, adding cross-account markers when applicable. */
@@ -37,10 +37,6 @@ function crossAccountAttToVpcChildInfo(att: { resourceId: string; resourceOwnerI
     ownerAccount: att.resourceOwnerId,
   };
 }
-
-const VPC_TABLE_ROW_HEIGHT = 24;
-const VPC_TABLE_HEADER_HEIGHT = 70;
-const VPC_TABLE_WIDTH = 300;
 
 function toTgwChildInfo(tgw: TransitGateway, homeAccountId: string): TgwChildInfo {
   const info: TgwChildInfo = {
@@ -702,7 +698,7 @@ export function buildGraph(
     );
     if (hasDxgwAssoc) return false;
     const hasAttachments = topology.transitGatewayAttachments.some(
-      (a) => a.transitGatewayId === tgwId && (a.resourceType === 'vpc' || a.resourceType === 'connect')
+      (a) => a.transitGatewayId === tgwId && (a.resourceType === 'vpc' || a.resourceType === 'connect' || a.resourceType === 'network-function')
     );
     if (hasAttachments) return false;
     const hasVpn = topology.vpnConnections.some((v) => v.transitGatewayId === tgwId);
@@ -888,7 +884,7 @@ export function buildGraph(
             const extra: Partial<DxNodeData> = { childCount: totalVpcCount, vpcChildren, details: { region, groupKey } };
             if (isTable) {
               extra.computedWidth = VPC_TABLE_WIDTH;
-              extra.computedHeight = VPC_TABLE_HEADER_HEIGHT + vpcChildren.length * VPC_TABLE_ROW_HEIGHT;
+              extra.computedHeight = vpcTableHeight(vpcChildren.length);
             }
             addNode(makeNode(vpcGroupId, 'vpcGroup', `${totalVpcCount} VPCs`, extra));
           }
@@ -973,7 +969,7 @@ export function buildGraph(
             const extra: Partial<DxNodeData> = { childCount: allGroupVpcIds.size, vpcChildren, details: { region, groupKey } };
             if (isTable) {
               extra.computedWidth = VPC_TABLE_WIDTH;
-              extra.computedHeight = VPC_TABLE_HEADER_HEIGHT + vpcChildren.length * VPC_TABLE_ROW_HEIGHT;
+              extra.computedHeight = vpcTableHeight(vpcChildren.length);
             }
             addNode(makeNode(vpcGroupId, 'vpcGroup', `${allGroupVpcIds.size} VPCs`, extra));
           }
@@ -1088,6 +1084,31 @@ export function buildGraph(
               }));
             }
             edges.push(makeEdge(tgwId, connectNodeId));
+          }
+
+          // AWS Network Firewall native TGW attachments — render as dedicated
+          // nodes for the same reason as TGW Connect above.
+          const firewallAtts = topology.transitGatewayAttachments.filter(
+            (a) => a.transitGatewayId === tgw.transitGatewayId && a.resourceType === 'network-function'
+          );
+          for (const att of firewallAtts) {
+            const firewallNodeId = `tgwfirewall-${att.transitGatewayAttachmentId}`;
+            if (!nodeIds.has(firewallNodeId)) {
+              // Label with the firewall's own name (from the attachment's
+              // ResourceId, which for a network-function attachment references
+              // the AWS Network Firewall) rather than the attachment's Name tag.
+              // ResourceId may be a bare name or an ARN — take the last path
+              // segment so an ARN renders as e.g. "poc-anf-tgw-native-att".
+              const firewallName =
+                (att.resourceId && (att.resourceId.split('/').pop() || att.resourceId)) ||
+                att.name ||
+                att.transitGatewayAttachmentId;
+              addNode(makeNode(firewallNodeId, 'tgwFirewall', firewallName, {
+                resourceId: att.transitGatewayAttachmentId,
+                details: { region, state: att.state },
+              }));
+            }
+            edges.push(makeEdge(tgwId, firewallNodeId));
           }
         }
       }

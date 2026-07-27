@@ -34,6 +34,25 @@ export const PEERING_INTRA_LANE = PEERING_INTRA_OFFSET + PEERING_LABEL_HALF + 4;
 // widest region (clearance) and their label must still fall inside AWS.
 export const PEERING_CROSS_LANE = PEERING_CROSS_CLEARANCE + PEERING_LABEL_HALF + 20;
 
+// --- VPC-group table geometry (single source of truth) ---
+// A collapsed VPC group can render as a scrollable table (view mode "table").
+// The layout engine reserves the node's height from these SAME constants the
+// VpcGroupNode component renders with, so the region container hugs the table
+// with no empty gap and no scroll overflow — change them here, both sides move
+// together (mirrors the PEERING_* "MUST match the renderer" pattern above).
+export const VPC_TABLE_WIDTH = 300;
+export const VPC_TABLE_HEADER_HEIGHT = 70; // title row + Expand/Collapse + column header
+export const VPC_TABLE_ROW_HEIGHT = 24; // one VPC row
+// The scroll body is capped here; beyond it the table scrolls internally. Both
+// the component's max-height and the layout's reserved height derive from this,
+// so they can never drift.
+export const VPC_TABLE_MAX_BODY_HEIGHT = 400;
+
+/** Reserved/rendered height of a VPC group table: header + capped, scrollable body. */
+export function vpcTableHeight(rowCount: number): number {
+  return VPC_TABLE_HEADER_HEIGHT + Math.min(rowCount * VPC_TABLE_ROW_HEIGHT, VPC_TABLE_MAX_BODY_HEIGHT);
+}
+
 // Intrinsic node dimensions used by the layout engine to compute positions dynamically.
 // These must approximate the ACTUAL rendered size of each node type (including icon, label,
 // subtitle, badges, and padding). If a node overflows its container, increase its dimensions here.
@@ -47,6 +66,7 @@ export const NODE_DIMENSIONS: Record<string, { width: number; height: number }> 
   dxGateway: { width: 180, height: 80 },
   tgw: { width: 170, height: 105 },
   tgwConnect: { width: 180, height: 70 },
+  tgwFirewall: { width: 200, height: 85 },
   vgw: { width: 200, height: 75 },
   vpc: { width: 200, height: 85 },
   vpcGroup: { width: 130, height: 90 },

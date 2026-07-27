@@ -82,6 +82,7 @@ export type NodeCategory =
   | 'dxGateway'
   | 'tgw'
   | 'tgwConnect'
+  | 'tgwFirewall'
   | 'vgw'
   | 'vpc'
   | 'vpcGroup'

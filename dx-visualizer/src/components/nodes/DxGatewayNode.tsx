@@ -19,7 +19,7 @@ export function DxGatewayNode({ id, data }: NodeProps) {
       subtitle="Direct Connect Gateway"
       icon={<DxGatewayIcon />}
       isRecommended={d.isRecommended}
-      borderColor="#7c3aed"
+      borderColor="#8B5CF6"
       bgColor="#1e1033"
       badges={d.badges}
     >
