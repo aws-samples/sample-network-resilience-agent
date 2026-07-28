@@ -27,6 +27,7 @@ import { AwsDeviceNode } from './nodes/AwsDeviceNode';
 import { DxGatewayNode } from './nodes/DxGatewayNode';
 import { TgwNode } from './nodes/TgwNode';
 import { TgwConnectNode } from './nodes/TgwConnectNode';
+import { TgwFirewallNode } from './nodes/TgwFirewallNode';
 import { CoreNetworkNode } from './nodes/CoreNetworkNode';
 import { VgwNode } from './nodes/VgwNode';
 import { VpcNode } from './nodes/VpcNode';
@@ -52,6 +53,7 @@ const nodeTypes = {
   dxGateway: DxGatewayNode,
   tgw: TgwNode,
   tgwConnect: TgwConnectNode,
+  tgwFirewall: TgwFirewallNode,
   coreNetwork: CoreNetworkNode,
   vgw: VgwNode,
   vpc: VpcNode,
@@ -184,7 +186,7 @@ export function FlowCanvas() {
       } else if (category === 'region') {
         const regionCode = details?.regionCode;
         if (!regionCode) return;
-        const regionChildCategories = new Set(['tgw', 'tgwConnect', 'tgwGroup', 'isolatedTgwGroup', 'vgw', 'vpc', 'vpcGroup']);
+        const regionChildCategories = new Set(['tgw', 'tgwConnect', 'tgwFirewall', 'tgwGroup', 'isolatedTgwGroup', 'vgw', 'vpc', 'vpcGroup']);
         for (const n of currentNodes) {
           if (!regionChildCategories.has(n.data.category)) continue;
           const nRegion = (n.data.details as Record<string, string>)?.region;

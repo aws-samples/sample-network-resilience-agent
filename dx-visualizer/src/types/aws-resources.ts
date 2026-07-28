@@ -132,7 +132,7 @@ export interface TransitGateway {
 export interface TransitGatewayAttachment {
   transitGatewayAttachmentId: string;
   transitGatewayId: string;
-  resourceType: 'vpc' | 'vpn' | 'direct-connect-gateway' | 'peering' | 'connect';
+  resourceType: 'vpc' | 'vpn' | 'direct-connect-gateway' | 'peering' | 'connect' | 'network-function';
   resourceId: string;
   resourceOwnerId: string;
   state: string;

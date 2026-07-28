@@ -2,6 +2,7 @@ import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData, VpcChildInfo } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
+import { VPC_TABLE_MAX_BODY_HEIGHT, VPC_TABLE_WIDTH } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { VpcIcon } from './aws-icons';
 
@@ -87,11 +88,24 @@ export function VpcGroupNode({ data, id }: NodeProps) {
         </div>
 
         <div
-          className={`max-h-[400px] overflow-y-auto selectable-text${isLocked ? ' nodrag nopan' : ''}`}
+          className={`overflow-y-auto selectable-text${isLocked ? ' nodrag nopan' : ''}`}
+          // Cap + scroll from the SAME constant the layout engine reserves height
+          // with (utils/constants → vpcTableHeight), so the node box and the
+          // rendered table can never disagree and leave an empty gap.
+          style={{ maxHeight: VPC_TABLE_MAX_BODY_HEIGHT }}
           onMouseDown={isLocked ? (e) => e.stopPropagation() : undefined}
           onPointerDown={isLocked ? (e) => e.stopPropagation() : undefined}
         >
-          <table className="w-full text-[9px] border-collapse">
+          {/* table-layout: fixed + explicit column widths keep every row a
+              SINGLE line (long VPC names truncate rather than wrap), so the
+              rendered row height matches VPC_TABLE_ROW_HEIGHT and the region
+              container reserves exactly enough — no overflow past its border. */}
+          <table className="text-[9px] border-collapse" style={{ tableLayout: 'fixed', width: VPC_TABLE_WIDTH }}>
+            <colgroup>
+              <col style={{ width: 150 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 60 }} />
+            </colgroup>
             <thead>
               <tr style={{ backgroundColor: theme === 'light' ? '#f8fafc' : 'rgba(139,92,246,0.1)' }}>
                 <th className={`text-left px-2 py-1 font-semibold ${theme === 'light' ? 'text-slate-600' : 'text-slate-400'}`}>Name</th>
@@ -107,15 +121,15 @@ export function VpcGroupNode({ data, id }: NodeProps) {
                   style={{ borderTop: `1px solid ${theme === 'light' ? '#f1f5f9' : 'rgba(255,255,255,0.05)'}` }}
                 >
                   <td className={`px-2 py-1 ${theme === 'light' ? 'text-slate-700' : 'text-slate-300'}`}>
-                    <div className="flex items-center gap-1 max-w-[120px]">
+                    <div className="flex items-center gap-1 min-w-0">
                       <span className="truncate" title={vpc.name}>{vpc.name}</span>
                       {vpc.crossAccount && (
                         <span className="shrink-0 text-[7px] px-1 rounded bg-amber-500/20 text-amber-400">X</span>
                       )}
                     </div>
                   </td>
-                  <td className={`px-2 py-1 font-mono ${theme === 'light' ? 'text-slate-600' : 'text-slate-400'}`}>{vpc.cidr}</td>
-                  <td className="px-2 py-1">
+                  <td className={`px-2 py-1 font-mono whitespace-nowrap truncate ${theme === 'light' ? 'text-slate-600' : 'text-slate-400'}`} title={vpc.cidr}>{vpc.cidr}</td>
+                  <td className="px-2 py-1 whitespace-nowrap">
                     <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${vpc.state === 'available' ? 'bg-green-400' : 'bg-yellow-400'}`} />
                     <span className={theme === 'light' ? 'text-slate-600' : 'text-slate-400'}>{vpc.state}</span>
                   </td>

@@ -1,7 +1,7 @@
 {
   "name": "dx-visualizer",
   "private": true,
-  "version": "0.29.2",
+  "version": "0.29.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,6 +34,7 @@
   },
   "overrides": {
     "ws": "^8.21.0",
+    "brace-expansion": "^5.0.8",
     "eslint-plugin-jsx-a11y": {
       "eslint": "$eslint"
     }

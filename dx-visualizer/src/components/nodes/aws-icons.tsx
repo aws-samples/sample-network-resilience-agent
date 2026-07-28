@@ -94,6 +94,38 @@ export const TransitGatewayIcon = ({ size = S }: { size?: number }) => (
   </svg>
 );
 
+/** AWS Network Firewall - a cloud outline holding a flame, with a brick wall
+    across its lower portion (matches the official Res_AWS-Network-Firewall
+    glyph). Drawn to currentColor so it inherits the node's accent, like the
+    other icons here. */
+export const FirewallIcon = ({ size = S }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 48 48"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    {/* cloud outline */}
+    <path d="M14 34.5a7 7 0 0 1-1-13.9 9 9 0 0 1 17.4-3.2A6.5 6.5 0 0 1 38 24.5a6.5 6.5 0 0 1-6.5 6.5" />
+    {/* flame inside the cloud (upper-left) */}
+    <path
+      d="M18.5 15.2c1 3 4.6 4.6 4.6 8.7 0 3.2-2.4 5.5-5.4 5.5S12.4 27 12.4 24c0-1.8.8-3.4 2.1-4.5-.1 1.6.8 3 2.2 3.5-.6-.7-.9-1.6-.9-2.5 0-2.9 2.4-3.8 3.2-6.9-.5 1.7-.1 3 .9 4-.3-1.7.1-3.1 1.5-4.2a4.5 4.5 0 0 1-2.9-.2z"
+      fill="currentColor"
+      stroke="none"
+    />
+    {/* brick wall across the lower portion */}
+    <rect x="20" y="27" width="18" height="12" rx="1" />
+    <line x1="20" y1="33" x2="38" y2="33" />
+    <line x1="29" y1="27" x2="29" y2="33" />
+    <line x1="24.5" y1="33" x2="24.5" y2="39" />
+    <line x1="33.5" y1="33" x2="33.5" y2="39" />
+  </svg>
+);
+
 /** VPN Gateway - Res_Amazon-VPC_VPN-Gateway_48 (from official icon deck slide 125) */
 export const VpnGatewayIcon = ({ size = S }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor">

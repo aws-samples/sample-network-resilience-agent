@@ -7,6 +7,8 @@ A solution that helps customers understand and improve the resilience of their A
 3. **Recommend** - Assesses your topology against AWS Direct Connect resiliency best practices and provides actionable recommendations, visualized as green dashed ghost overlays on the diagram
 4. **Chat** - An AI-powered chat agent (Amazon Bedrock) that understands your topology context and can answer questions, explain trade-offs, provide live pricing estimates, query actual costs, and suggest specific steps to improve resilience
 
+![Resiliency Visualization Overview](docs/images/Overview.png)
+
 ## Table of Contents
 
 1. [Running the Application](#1-running-the-application)
@@ -154,6 +156,8 @@ The card can be expanded inline or opened as a fullscreen modal. A **Download Re
 
 ## 5. Recommendation Engine
 
+![Resiliency Recommendation](docs/images/Recommendation.png)
+
 The recommendation system has two independent categories:
 
 1. **Resiliency recommendations** analyze the topology structure for single points of failure and recommend the **additional resources** that would close each gap — moving a DX Gateway toward the High / Maximum tiers defined in [Section 4](#4-resilience-status). In the **Recommended** view these appear as **green dashed ghost nodes and edges** overlaid on the existing diagram. Resiliency rules run **per DX Gateway** — each DXGW is assessed independently against its own target tier, so accounts with multiple DXGWs get one set of ghost overlays per gateway.
@@ -184,6 +188,8 @@ For the full rule-by-rule reference — every resiliency rule and best-practice 
 ## 6. AI Chat Agent
 
 The chat panel connects to **Amazon Bedrock** (Claude Opus 4.7 via ConverseStream API with cross-region inference).
+
+![Chat Interface](docs/images/Chat.png)
 
 ### 6.1 Changing the Model
 

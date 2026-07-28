@@ -24,7 +24,7 @@ const CLOUD_INTERNAL_GAP_AFTER = new Set(['dxGateway', 'coreNetwork', 'cgw']);
 // we inflate the column gap by CONTAINER_PAD_X to preserve the intended
 // breathing room. Without this, a topology with no Cloud WAN / no VPN renders
 // the DXGW flush against the region container's left edge.
-const COLS_INSIDE_REGION = new Set(['cgw', 'tgw_vgw', 'tgwConnect', 'vpc']);
+const COLS_INSIDE_REGION = new Set(['cgw', 'tgw_vgw', 'tgwConnect', 'tgwFirewall', 'vpc']);
 const V_GAP_RATIO = 0.6;       // vertical gap between rows as fraction of max node height in column
 // AWS Public Endpoints (publicResources) share the dxGateway column with the DX
 // Gateway and barycenter onto the same AWS logical devices, so once Step 9.1
@@ -56,16 +56,18 @@ function lagFanHalfHeight(memberCount: number): number {
 const VPN_SECTION_GAP_MIN = 0.25;   // minimum gap ratio when VPN connects to nearby column
 const VPN_SECTION_GAP_PER_COL = 0.08; // additional gap per column the VPN edge spans
 const VPN_SECTION_GAP_MAX_RATIO = 1.0; // cap on total gap ratio — prevents long-span edges from ballooning the empty strip above AWS Cloud
-// When utilization mode is on, the DX Connection / VIF edge labels grow an
-// extra row (ingress/egress/peak %) plus a progress bar — CustomEdge sets
-// maxWidth: 220 vs 180 normally. The default H_GAP_RATIO gap (~150px on a
-// typical topology) is narrower than 220px, so the label overlaps both the
-// partner device on its left and the AWS Logical Device on its right. These
-// minimums apply only to the gaps AFTER the columns that carry utilization-
-// bearing edges: dxPartnerDevice → awsDevice (DX Connection) and
-// awsDevice → dxGateway (VIF).
-const UTIL_LABEL_GAP_MIN = 250; // px — 220 (label maxWidth) + 30 breathing
-const UTIL_GAP_AFTER = new Set(['dxPartnerDevice', 'awsDevice']);
+// The DX Connection / VIF edge labels ride the midpoint of the gap AFTER their
+// left column and are up to 180px wide (220px in utilization mode, which adds an
+// ingress/egress/peak-% row + progress bar — CustomEdge sets maxWidth 220 vs 180).
+// The default H_GAP_RATIO gap (~160px on a typical topology) is narrower than the
+// label, so the centered label overruns both the partner device on its left and
+// the AWS Logical Device on its right. Reserve a minimum gap AFTER the columns
+// those edges leave — dxPartnerDevice → awsDevice (DX Connection) and
+// awsDevice → dxGateway (VIF) — so the label always clears its neighbours.
+// Sized to the label maxWidth + 30px breathing; util mode's wider label needs more.
+const LABEL_GAP_MIN = 210;      // px — 180 (label maxWidth) + 30 breathing
+const UTIL_LABEL_GAP_MIN = 250; // px — 220 (util label maxWidth) + 30 breathing
+const LABEL_GAP_AFTER = new Set(['dxPartnerDevice', 'awsDevice']);
 
 // ---- Column definitions (DX flow left-to-right) ----
 // IMPORTANT: Column widths are measured from DX nodes ONLY.
@@ -84,7 +86,7 @@ const COLUMN_DEFS: { key: string; categories: string[] }[] = [
   { key: 'cgw', categories: ['cgw'] },              // VPN connection — in region
   { key: 'tgw_vgw', categories: ['tgw', 'tgwGroup', 'isolatedTgwGroup', 'vgw'] },
   { key: 'tgwConnect', categories: ['tgwConnect'] }, // dedicated column — collapses when unused
-  { key: 'vpc', categories: ['vpc', 'vpcGroup'] },
+  { key: 'vpc', categories: ['vpc', 'vpcGroup', 'tgwFirewall'] },
 ];
 
 function nodeDim(category: string, node?: DxNode) {
@@ -272,11 +274,12 @@ export function applyLayout(
       } else {
         gap = hGap;
       }
-      // Utilization mode widens DX Connection / VIF edge labels (extra
-      // ingress/egress/% row + progress bar). Bump the gap after the columns
-      // those edges land on so the label doesn't overlap the adjacent nodes.
-      if (showUtilization && UTIL_GAP_AFTER.has(col.key)) {
-        gap = Math.max(gap, UTIL_LABEL_GAP_MIN);
+      // DX Connection / VIF edge labels sit centered in this gap and are wider
+      // than the default ratio gap, so reserve at least the label width after
+      // the columns those edges leave. Utilization mode widens the label further
+      // (extra ingress/egress/% row + progress bar), so it needs a larger min.
+      if (LABEL_GAP_AFTER.has(col.key)) {
+        gap = Math.max(gap, showUtilization ? UTIL_LABEL_GAP_MIN : LABEL_GAP_MIN);
       }
       cursorX += w + gap;
     }
@@ -1175,7 +1178,7 @@ export function applyLayout(
   // tgwConnect nodes pin to their TGW's Y after pairing so the attachment
   // edge is a clean horizontal line.
   const gatewayCats = new Set(['tgw', 'vgw', 'tgwGroup', 'isolatedTgwGroup']);
-  const vpcCats = new Set(['vpc', 'vpcGroup']);
+  const vpcCats = new Set(['vpc', 'vpcGroup', 'tgwFirewall']);
 
   const regionsWithNodes = new Set<string>();
   for (const n of positioned.values()) {
@@ -1184,7 +1187,8 @@ export function applyLayout(
     if (
       gatewayCats.has(n.data.category) ||
       vpcCats.has(n.data.category) ||
-      n.data.category === 'tgwConnect'
+      n.data.category === 'tgwConnect' ||
+      n.data.category === 'tgwFirewall'
     ) {
       regionsWithNodes.add(r);
     }
@@ -1311,6 +1315,7 @@ export function applyLayout(
             const other = positioned.get(otherId);
             if (!other) continue;
             if (other.data.category === 'tgwConnect') continue;
+            if (other.data.category === 'tgwFirewall') continue;
             const oDim = nodeDim(other.data.category, other);
             extYs.push(other.position.y + oDim.height / 2);
           }
@@ -1541,7 +1546,7 @@ export function applyLayout(
   // top-down at exactly REGION_GROUP_GAP apart — preserving internal ordering from Step 6
   // while eliminating both gaps and overlaps.
   if (regionOrder.length > 1) {
-    const regionBoundsCats = new Set(['tgw', 'tgwGroup', 'isolatedTgwGroup', 'tgwConnect', 'vgw', 'vpc', 'vpcGroup', 'cgw']);
+    const regionBoundsCats = new Set(['tgw', 'tgwGroup', 'isolatedTgwGroup', 'tgwConnect', 'tgwFirewall', 'vgw', 'vpc', 'vpcGroup', 'cgw']);
 
     const regionNodeIds3 = new Map<string, string[]>();
     for (const [id, node] of positioned) {
@@ -1812,7 +1817,7 @@ export function applyLayout(
   for (const region of regionContainers) {
     const regionCode = (region.data.details as Record<string, string>)?.regionCode ?? '';
     const regionChildren = [...positioned.values()].filter((n) => {
-      if (!['coreNetwork', 'tgw', 'tgwGroup', 'isolatedTgwGroup', 'vgw', 'vpc', 'vpcGroup', 'cgw'].includes(n.data.category)) return false;
+      if (!['coreNetwork', 'tgw', 'tgwGroup', 'isolatedTgwGroup', 'tgwConnect', 'tgwFirewall', 'vgw', 'vpc', 'vpcGroup', 'cgw'].includes(n.data.category)) return false;
       if (n.data.isRecommended) return false;
       const nodeRegion = (n.data.details as Record<string, string>)?.region;
       if (nodeRegion) return nodeRegion === regionCode;
@@ -1845,7 +1850,7 @@ export function applyLayout(
   if (awsCloudNode) {
     // Collect all nodes that should be inside the AWS Cloud: DX Gateways, TGW/VGW, VPC, VpcGroup, and Region containers
     const awsChildren = [...positioned.values()].filter(
-      (n) => ['dxGateway', 'coreNetwork', 'tgw', 'tgwGroup', 'isolatedTgwGroup', 'vgw', 'vpc', 'vpcGroup', 'region', 'cgw', 'tgwConnect', 'publicResources'].includes(n.data.category)
+      (n) => ['dxGateway', 'coreNetwork', 'tgw', 'tgwGroup', 'isolatedTgwGroup', 'vgw', 'vpc', 'vpcGroup', 'region', 'cgw', 'tgwConnect', 'tgwFirewall', 'publicResources'].includes(n.data.category)
     );
 
     if (awsChildren.length > 0) {
@@ -2321,7 +2326,7 @@ export function applyLayout(
   }
 
   // region → tgw, tgwGroup, tgwConnect, vgw, vpc, vpcGroup, cgw (MUST happen before awsCloud conversion)
-  const regionChildCats = new Set(['tgw', 'tgwGroup', 'isolatedTgwGroup', 'tgwConnect', 'vgw', 'vpc', 'vpcGroup', 'cgw']);
+  const regionChildCats = new Set(['tgw', 'tgwGroup', 'isolatedTgwGroup', 'tgwConnect', 'tgwFirewall', 'vgw', 'vpc', 'vpcGroup', 'cgw']);
   for (const region of regionContainers) {
     const regionNode = positioned.get(region.id);
     if (!regionNode) continue;
