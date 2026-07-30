@@ -14,13 +14,22 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
   const light = useIsLight();
   const trapRef = useFocusTrap(true, onCancel);
 
+  // Only a click on the backdrop itself dismisses — clicks that land on the
+  // dialog bubble up to here but keep `target` inside the panel, so the panel
+  // needs no stopPropagation handler of its own.
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) onCancel();
+  };
+
   return (
+    // Backdrop is click-to-dismiss only and deliberately not focusable; the
+    // focus trap already closes the dialog on Escape.
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       className={`fixed inset-0 z-50 flex items-center justify-center ${
         light ? 'bg-slate-900/30 backdrop-blur-md' : 'bg-black/60'
       }`}
-      onClick={onCancel}
+      onClick={handleBackdropClick}
     >
       <div
         ref={trapRef}
@@ -33,7 +42,6 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
             ? 'bg-[#fafbfc] border-slate-200/70 shadow-[0_24px_60px_-20px_rgba(15,23,42,0.18)]'
             : 'bg-slate-800 border-slate-600 shadow-2xl'
         }`}
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3 mb-4">
           <div
@@ -108,10 +116,13 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
           >
             Cancel
           </button>
+          {/* Deliberately no autoFocus — useFocusTrap moves focus to Cancel on
+              mount (its passive effect runs after React's autoFocus commit, so
+              the prop was inert), which is the safer default for a destructive
+              confirm. */}
           <button
             type="button"
             onClick={onConfirm}
-            autoFocus
             className="px-3.5 py-1.5 text-[12px] font-semibold rounded-lg transition-colors bg-amber-500 text-white hover:bg-amber-600 shadow-sm"
           >
             Export full data

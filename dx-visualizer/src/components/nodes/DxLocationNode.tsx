@@ -80,6 +80,9 @@ export function DxLocationNode({ id, data }: NodeProps) {
         }}
       >
         <DirectConnectIcon size={14} />
+        {/* Pointer handlers only stop React Flow claiming the gesture as a drag so the
+            location label stays selectable — no action fires, nothing to expose to the keyboard. */}
+        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
         <span
           className={`selectable-text${isLocked ? ' nodrag nopan' : ''}`}
           style={{ pointerEvents: 'auto' }}

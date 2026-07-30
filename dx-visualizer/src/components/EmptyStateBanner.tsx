@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
+import type { TopologyData } from '../types/topology';
 
 // Canvas overlay shown when the active topology has no Direct Connect resources
 // to visualize. Explains that this is expected behavior (not an error) and
@@ -17,13 +18,12 @@ export function EmptyStateBanner({ welcomeDismissed = false }: { welcomeDismisse
   const error = useTopologyStore((s) => s.error);
   const light = useIsLight();
 
-  // Reset the dismissed flag whenever the topology reference changes (scenario
-  // switch, sign-in/out, snapshot import) so the notice reappears for the new
-  // context instead of staying hidden for the whole session.
-  const [dismissed, setDismissed] = useState(false);
-  useEffect(() => {
-    setDismissed(false);
-  }, [topologyData]);
+  // Remember *which* topology the notice was dismissed for rather than a bare
+  // boolean, so a reference change (scenario switch, sign-in/out, snapshot
+  // import) re-surfaces it for the new context instead of staying hidden for
+  // the whole session.
+  const [dismissedFor, setDismissedFor] = useState<TopologyData | null>(null);
+  const dismissed = topologyData != null && dismissedFor === topologyData;
 
   // An error overlay is already rendered by App.tsx — don't stack a second
   // empty-state on top of it. The loading spinner takes precedence too.
@@ -67,7 +67,7 @@ export function EmptyStateBanner({ welcomeDismissed = false }: { welcomeDismisse
         }`}
       >
         <button
-          onClick={() => setDismissed(true)}
+          onClick={() => setDismissedFor(topologyData)}
           aria-label="Dismiss notice"
           className={`absolute top-2 right-2 w-6 h-6 flex items-center justify-center rounded transition-colors ${
             light ? 'text-slate-400 hover:text-slate-600 hover:bg-slate-100' : 'text-slate-500 hover:text-slate-300 hover:bg-white/[0.06]'

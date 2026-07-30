@@ -51,6 +51,9 @@ export function IsolatedTgwGroupNode({ data, id }: NodeProps) {
           className="flex items-center justify-between px-3 py-1.5"
           style={{ borderBottom: `1px solid ${theme === 'light' ? '#e2e5ea' : 'rgba(139,92,246,0.3)'}` }}
         >
+          {/* Pointer handlers only stop React Flow claiming the gesture as a drag so the
+              title stays selectable — no action fires, nothing for a keyboard user to do. */}
+          {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
           <div
             className={`flex items-center gap-1.5 selectable-text${isLocked ? ' nodrag nopan' : ''}`}
             onMouseDown={isLocked ? (e) => e.stopPropagation() : undefined}
@@ -87,6 +90,9 @@ export function IsolatedTgwGroupNode({ data, id }: NodeProps) {
           </div>
         </div>
 
+        {/* Same drag guard as the header: the table body is read-only, so there is no
+            action to expose to the keyboard. */}
+        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
         <div
           className={`max-h-[400px] overflow-y-auto selectable-text${isLocked ? ' nodrag nopan' : ''}`}
           onMouseDown={isLocked ? (e) => e.stopPropagation() : undefined}

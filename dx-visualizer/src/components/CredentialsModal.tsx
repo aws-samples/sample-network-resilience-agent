@@ -53,16 +53,24 @@ export function CredentialsModal({ onClose, onConnect }: Props) {
           : 'text-slate-400 hover:text-slate-200'
     }`;
 
+  // Only a click on the backdrop itself dismisses — clicks inside the dialog
+  // bubble up to here but keep `target` on the panel, so the panel needs no
+  // stopPropagation handler of its own.
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) onClose();
+  };
+
   return (
+    // Backdrop is click-to-dismiss only and deliberately not focusable; the
+    // focus trap already closes the dialog on Escape.
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-    <div className={`fixed inset-0 z-50 flex items-center justify-center ${light ? 'bg-slate-900/30 backdrop-blur-md' : 'bg-black/60'}`} onClick={onClose}>
+    <div className={`fixed inset-0 z-50 flex items-center justify-center ${light ? 'bg-slate-900/30 backdrop-blur-md' : 'bg-black/60'}`} onClick={handleBackdropClick}>
       <div
         ref={trapRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="credentials-modal-title"
         className={`rounded-2xl border p-7 w-[460px] ${light ? 'bg-[#fafbfc] border-slate-200/70 shadow-[0_24px_60px_-20px_rgba(15,23,42,0.18)]' : 'bg-slate-800 border-slate-600 shadow-2xl'}`}
-        onClick={(e) => e.stopPropagation()}
       >
         <h2 id="credentials-modal-title" className={`text-[17px] font-semibold mb-5 tracking-tight ${light ? 'text-slate-700' : 'text-white'}`}>Connect to AWS</h2>
 

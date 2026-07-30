@@ -90,6 +90,20 @@ export const BaseNode = memo(function BaseNode({
     }
   };
 
+  // The card only *is* a control while simulating — outside simulation it must stay
+  // a plain, non-focusable div so nodes don't add a tab stop each.
+  const canToggleFailure = Boolean(isSimulating && nodeId && !isRecommended);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Ignore keys bubbling up from the overlay buttons — preventDefault here
+    // would swallow their own activation.
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleClick();
+    }
+  };
+
   const accentStrip = light && !isFailed && !isRecommended
     ? `inset 4px 0 0 0 ${effectiveBorder}`
     : null;
@@ -108,6 +122,10 @@ export const BaseNode = memo(function BaseNode({
   return (
     <div data-node-card className="flex items-center justify-center" style={{ width: '100%', height: '100%' }}>
       <div
+        role={canToggleFailure ? 'button' : undefined}
+        tabIndex={canToggleFailure ? 0 : undefined}
+        aria-pressed={canToggleFailure ? isFailed : undefined}
+        aria-label={canToggleFailure ? `Toggle simulated failure for ${r(label)}` : undefined}
         className={`relative flex flex-col items-start justify-center rounded-md px-2.5 py-1.5 transition-all ${canGlow ? 'hover:brightness-110' : ''} ${isSpotlit ? 'node-spotlight' : ''} ${isPinned ? 'node-pinned' : ''}`}
         style={{
           borderWidth: isFailed ? 2.5 : light ? 1 : 1.5,
@@ -124,7 +142,8 @@ export const BaseNode = memo(function BaseNode({
           cursor: isSimulating && !isRecommended ? 'pointer' : undefined,
           filter: isFailed ? 'grayscale(50%)' : undefined,
         }}
-        onClick={handleClick}
+        onClick={canToggleFailure ? handleClick : undefined}
+        onKeyDown={canToggleFailure ? handleKeyDown : undefined}
       >
         {handles.target && targetHandleIds && targetHandleIds.length > 0 ? (
           targetHandleIds.map((hid, i) => (
@@ -146,6 +165,10 @@ export const BaseNode = memo(function BaseNode({
         ) : null}
         <div className="flex items-start gap-2 w-full">
           <div className="flex-shrink-0 flex items-center justify-center" style={{ color: effectiveBorder, width: 28, height: 28 }}>{icon}</div>
+          {/* The pointer handlers only stop React Flow from claiming the gesture as a
+              drag so the label stays selectable — no action fires, so there is nothing
+              for a keyboard user to activate here. */}
+          {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
           <div
             className={`flex flex-col items-start min-w-0 gap-0.5 selectable-text${isLocked ? ' nodrag nopan' : ''}`}
             onMouseDown={isLocked ? (e) => e.stopPropagation() : undefined}
@@ -208,6 +231,9 @@ export const BaseNode = memo(function BaseNode({
           />
         ))}
         {topRightOverlay && (
+          /* Wrapper only shields the overlay's own controls from React Flow's drag
+             handling; the controls inside carry the keyboard-accessible actions. */
+          /* eslint-disable-next-line jsx-a11y/no-static-element-interactions */
           <div
             className="nodrag nopan"
             style={{

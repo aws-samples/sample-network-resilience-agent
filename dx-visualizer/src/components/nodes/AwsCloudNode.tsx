@@ -2,7 +2,7 @@ import type { NodeProps } from '@xyflow/react';
 import { useTopologyStore } from '../../store/topology-store';
 import { AwsLogo } from './aws-icons';
 
-export function AwsCloudNode({}: NodeProps) {
+export function AwsCloudNode(_: NodeProps) {
   const theme = useTopologyStore((s) => s.theme);
   const light = theme === 'light';
 

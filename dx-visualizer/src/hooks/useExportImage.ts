@@ -160,5 +160,5 @@ export function useExportImage() {
     }
 
     download(dataUrl, `topology-${timestamp()}.png`);
-  }, [getNodes, theme]);
+  }, [getNodes, screenToFlowPosition, theme]);
 }

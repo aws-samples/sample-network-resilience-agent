@@ -781,12 +781,13 @@ export function FlowCanvas() {
   }, [nodes, edges]);
 
   // Hint dismissal is intentionally session-only (no localStorage) so a page
-  // refresh resurfaces it. A topology refresh or scenario switch also resurfaces
-  // it via the effect below keyed on topologyData.
+  // refresh resurfaces it. Storing *which* topology it was dismissed for (rather
+  // than a bare boolean) also resurfaces it on a topology refresh or scenario
+  // switch, since those hand us a new object reference.
   const topologyData = useTopologyStore((s) => s.topologyData);
-  const [drawHintDismissed, setDrawHintDismissed] = useState(false);
-  useEffect(() => { setDrawHintDismissed(false); }, [topologyData]);
-  const dismissDrawHint = useCallback(() => setDrawHintDismissed(true), []);
+  const [drawHintDismissedFor, setDrawHintDismissedFor] = useState<typeof topologyData>(null);
+  const dismissDrawHint = useCallback(() => setDrawHintDismissedFor(topologyData), [topologyData]);
+  const drawHintDismissed = topologyData != null && drawHintDismissedFor === topologyData;
   const showDrawHint = hasUnwiredPartnerDevice && !isSimulating && !drawHintDismissed;
 
   const hasMultipleLegendEntries = viewMode === 'recommended' || hasCrossAccount || hasInferredConnection;
