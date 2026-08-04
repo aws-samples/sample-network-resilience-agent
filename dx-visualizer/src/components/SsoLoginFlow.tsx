@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
 import {
@@ -75,6 +75,29 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
     setStep('error');
   }, []);
 
+  // Load the roles available for an account. Driven from the paths that pick an
+  // account (the dropdown, and the single-account auto-select below) rather than
+  // from an effect on selectedAccountId. The token is a parameter because
+  // handleStart has it in hand before the accessToken state update is applied.
+  const loadRoles = useCallback((accountId: string, token: string) => {
+    setLoadingRoles(true);
+    setSelectedRole('');
+    ssoListRoles(ssoRegion, token, accountId, backendUrl.trim())
+      .then(({ roles: r }) => {
+        setRoles(r);
+        if (r.length === 1) setSelectedRole(r[0].roleName);
+      })
+      .catch((err) => handleError(err instanceof Error ? err.message : 'Failed to load roles'))
+      .finally(() => setLoadingRoles(false));
+  }, [ssoRegion, backendUrl, handleError]);
+
+  const handleAccountChange = (accountId: string) => {
+    setSelectedAccountId(accountId);
+    // Re-selecting the "Select an account..." placeholder just clears the choice;
+    // there is nothing to fetch roles for.
+    if (accountId) loadRoles(accountId, accessToken);
+  };
+
   // Start SSO flow
   const handleStart = async () => {
     if (!backendUrl.trim()) return handleError('Backend URL is required');
@@ -112,7 +135,19 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
             // Fetch accounts
             const { accounts: accts } = await ssoListAccounts(ssoRegion, poll.accessToken, backendUrl.trim());
             setAccounts(accts);
-            if (accts.length === 1) setSelectedAccountId(accts[0].accountId);
+            // Clear any account/role picked under the PREVIOUS token. Re-entering
+            // this flow via "Try Again" keeps the component mounted, so without
+            // this the role dropdown would still hold roles listed for the old
+            // session — stale at best, and cross-org if the retry used a
+            // different Start URL. Roles are refetched below (single account) or
+            // when the user picks one.
+            setSelectedAccountId('');
+            setRoles([]);
+            setSelectedRole('');
+            if (accts.length === 1) {
+              setSelectedAccountId(accts[0].accountId);
+              loadRoles(accts[0].accountId, poll.accessToken);
+            }
             setStep('selectAccount');
             return;
           }
@@ -139,20 +174,6 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
     cancelRef.current = true;
     setStep('input');
   };
-
-  // Load roles when account is selected
-  useEffect(() => {
-    if (!selectedAccountId || !accessToken) return;
-    setLoadingRoles(true);
-    setSelectedRole('');
-    ssoListRoles(ssoRegion, accessToken, selectedAccountId, backendUrl.trim())
-      .then(({ roles: r }) => {
-        setRoles(r);
-        if (r.length === 1) setSelectedRole(r[0].roleName);
-      })
-      .catch((err) => handleError(err instanceof Error ? err.message : 'Failed to load roles'))
-      .finally(() => setLoadingRoles(false));
-  }, [selectedAccountId, accessToken, ssoRegion, backendUrl, handleError]);
 
   // Connect with selected account/role
   const handleConnect = async () => {
@@ -190,8 +211,9 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
     return (
       <div className="space-y-3">
         <div>
-          <label className={labelCls}>Backend URL</label>
+          <label htmlFor="sso-backend-url" className={labelCls}>Backend URL</label>
           <input
+            id="sso-backend-url"
             type="url"
             value={backendUrl}
             onChange={(e) => setBackendUrl(e.target.value)}
@@ -203,8 +225,9 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
           </p>
         </div>
         <div>
-          <label className={labelCls}>Start URL</label>
+          <label htmlFor="sso-start-url" className={labelCls}>Start URL</label>
           <input
+            id="sso-start-url"
             type="url"
             value={startUrl}
             onChange={(e) => setStartUrl(e.target.value)}
@@ -213,8 +236,9 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
           />
         </div>
         <div>
-          <label className={labelCls}>Region</label>
+          <label htmlFor="sso-region" className={labelCls}>Region</label>
           <select
+            id="sso-region"
             value={ssoRegion}
             onChange={(e) => setSsoRegion(e.target.value)}
             className={inputCls}
@@ -236,8 +260,9 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
           </button>
           {showEnrich && (
             <div className="mt-2">
-              <label className={labelCls}>Spoke Account IDs</label>
+              <label htmlFor="sso-spoke-accounts" className={labelCls}>Spoke Account IDs</label>
               <input
+                id="sso-spoke-accounts"
                 type="text"
                 value={spokeAccountsRaw}
                 onChange={(e) => setSpokeAccountsRaw(e.target.value)}
@@ -308,10 +333,11 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
           SSO authenticated successfully
         </div>
         <div>
-          <label className={labelCls}>Account</label>
+          <label htmlFor="sso-account" className={labelCls}>Account</label>
           <select
+            id="sso-account"
             value={selectedAccountId}
-            onChange={(e) => setSelectedAccountId(e.target.value)}
+            onChange={(e) => handleAccountChange(e.target.value)}
             className={inputCls}
           >
             <option value="">Select an account...</option>
@@ -324,11 +350,22 @@ export function SsoLoginFlow({ onConnect, onCancel }: Props) {
         </div>
         {selectedAccountId && (
           <div>
-            <label className={labelCls}>Role</label>
+            <label htmlFor="sso-role" className={labelCls}>Role</label>
             {loadingRoles ? (
-              <p className={`text-xs ${light ? 'text-slate-400' : 'text-slate-500'}`}>Loading roles...</p>
+              // Keep an element with id="sso-role" mounted while roles load, so the
+              // label above is never left pointing at nothing (a screen reader would
+              // otherwise announce "Role" with no associated control). aria-busy
+              // tells assistive tech the value is still arriving.
+              <p
+                id="sso-role"
+                aria-busy="true"
+                className={`text-xs ${light ? 'text-slate-400' : 'text-slate-500'}`}
+              >
+                Loading roles...
+              </p>
             ) : (
               <select
+                id="sso-role"
                 value={selectedRole}
                 onChange={(e) => setSelectedRole(e.target.value)}
                 className={inputCls}

@@ -112,14 +112,20 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
 
   // Reset to today's month whenever the panel closes so reopening always
-  // lands on "now" rather than wherever the user last navigated.
-  useEffect(() => {
+  // lands on "now" rather than wherever the user last navigated. The month/day
+  // are user-navigable state that has to persist while the panel is open, so it
+  // can't be derived — instead we react to the open -> closed transition during
+  // render, which keeps the reopen instant (the panel never paints last month's
+  // grid first) without the cascading re-render an effect would cause.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (!open) {
       setViewYear(todayAnchor.year);
       setViewMonth(todayAnchor.month);
       setSelectedDay(null);
     }
-  }, [open, todayAnchor.year, todayAnchor.month]);
+  }
 
   useEffect(() => {
     if (!open) return;

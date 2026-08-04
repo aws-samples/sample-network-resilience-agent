@@ -215,10 +215,10 @@ The `DxVisualizerAIChat` IAM statement only grants the *permission* to invoke Be
 2. Open the **Amazon Bedrock** service
 3. In the left nav, choose **Model access**
 4. Click **Enable specific models** (or **Modify model access**)
-5. Tick the model family (the visualizer defaults to Claude Opus 4.7 — see `VITE_BEDROCK_MODEL_ID` in `.env`)
+5. Tick the model family (the visualizer defaults to Claude Opus 5 — see `VITE_BEDROCK_MODEL_ID` in `.env`)
 6. Submit the request
 
-**Cross-region inference profiles**: if the model ID already carries a `global.`, `us.`, `eu.`, or `apac.` prefix, the app uses it verbatim; otherwise it auto-prepends a regional prefix (`us.`, `eu.`, `apac.`) based on your selected region. Either way, calls route through a Bedrock cross-region inference profile, which spreads load across the regions in the profile's geo. The shipped default (`global.anthropic.claude-opus-4-7`) uses the **global** inference profile. Model access only needs to be enabled in your home region; the inference profile handles the rest.
+**Cross-region inference profiles**: if the model ID already carries a `global.`, `us.`, `eu.`, or `apac.` prefix, the app uses it verbatim; otherwise it auto-prepends a regional prefix (`us.`, `eu.`, `apac.`) based on your selected region. Either way, calls route through a Bedrock cross-region inference profile, which spreads load across the regions in the profile's geo. The shipped default (`global.anthropic.claude-opus-5`) uses the **global** inference profile. Model access only needs to be enabled in your home region; the inference profile handles the rest.
 
 If chat returns "model access denied" or simply errors silently, this step is the most common cause.
 
@@ -440,7 +440,7 @@ All configuration is via environment variables (see [`.env.example`](../.env.exa
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VITE_BEDROCK_MODEL_ID` | `global.anthropic.claude-opus-4-7` | Bedrock model ID (cross-region prefix auto-added) |
+| `VITE_BEDROCK_MODEL_ID` | `global.anthropic.claude-opus-5` | Bedrock model ID (cross-region prefix auto-added) |
 | `VITE_DEFAULT_REGION` | `us-east-1` | Fallback AWS region (regions are auto-discovered from DX/Cloud WAN data) |
 | `VITE_MAX_TOOL_ROUNDS` | `5` | Max tool-use rounds per chat turn |
 | `VITE_DEFAULT_SCENARIO` | `noResiliency` | Default mock scenario |

@@ -219,7 +219,7 @@ async function handleEstimateUpgradeCost(input: Record<string, unknown>): Promis
     : (additionalLocations > 0 ? additionalLocations : additionalConnectionsPerLocation);
 
   let estimatedMonthlyCost = 0;
-  let pricingNote = '';
+  let pricingNote: string;
   const creds = store.credentials;
   if (creds) {
     const pricing = await lookupDxPricing(creds, refRegion, refBandwidth, Math.max(totalNewConnections, 1));

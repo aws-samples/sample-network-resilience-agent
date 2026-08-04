@@ -4,7 +4,6 @@ import {
   ruleVifDown,
   ruleConnectionNotAvailable,
   ruleNoVpnBackup,
-  ruleCrossRegionPath,
   ruleSlaAwareness,
   ruleResiliencyToolkit,
   ruleConsistentPrefixAdvertisement,
@@ -116,45 +115,6 @@ describe('ruleNoVpnBackup', () => {
     t.connections = [{ connectionId: 'c1', connectionState: 'available', tags: {} } as any];
     t.vpnConnections = [{ vpnConnectionId: 'vpn-1', tags: {} } as any];
     expect(ruleNoVpnBackup(t).recommendation).toBeNull();
-  });
-});
-
-describe('ruleCrossRegionPath', () => {
-  it('returns no recommendation when no connections exist', () => {
-    expect(ruleCrossRegionPath(makeEmptyTopology()).recommendation).toBeNull();
-  });
-
-  it('returns no recommendation when no resource regions exist', () => {
-    const t = makeEmptyTopology();
-    t.connections = [{ connectionId: 'c1', region: 'us-east-1', connectionState: 'available', tags: {} } as any];
-    expect(ruleCrossRegionPath(t).recommendation).toBeNull();
-  });
-
-  it('returns no recommendation when DX and resource regions match', () => {
-    const t = makeEmptyTopology();
-    t.connections = [{ connectionId: 'c1', region: 'us-east-1', connectionState: 'available', tags: {} } as any];
-    t.vpcs = [{ vpcId: 'vpc-1', region: 'us-east-1', cidrBlock: '10.0.0.0/16' } as any];
-    expect(ruleCrossRegionPath(t).recommendation).toBeNull();
-  });
-
-  it('returns recommendation when DX region differs from VPC region', () => {
-    const t = makeEmptyTopology();
-    t.connections = [{ connectionId: 'c1', region: 'us-east-1', connectionState: 'available', tags: {} } as any];
-    t.vpcs = [{ vpcId: 'vpc-1', region: 'ap-southeast-1', cidrBlock: '10.0.0.0/16' } as any];
-    const result = ruleCrossRegionPath(t);
-    expect(result.recommendation).not.toBeNull();
-    expect(result.recommendation!.ruleId).toBe('cross-region-path');
-    expect(result.recommendation!.severity).toBe('info');
-    expect(result.recommendation!.description).toContain('ap-southeast-1');
-  });
-
-  it('returns recommendation when DX region differs from TGW region', () => {
-    const t = makeEmptyTopology();
-    t.connections = [{ connectionId: 'c1', region: 'us-east-1', connectionState: 'available', tags: {} } as any];
-    t.transitGateways = [{ transitGatewayId: 'tgw-1', transitGatewayArn: 'arn:aws:ec2:eu-west-1:123:transit-gateway/tgw-1' } as any];
-    const result = ruleCrossRegionPath(t);
-    expect(result.recommendation).not.toBeNull();
-    expect(result.recommendation!.description).toContain('eu-west-1');
   });
 });
 

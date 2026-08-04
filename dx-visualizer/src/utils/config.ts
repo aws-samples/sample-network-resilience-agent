@@ -6,7 +6,7 @@ import type { MockScenario } from './shared';
 
 export const config = {
   /** Bedrock model ID (without cross-region prefix). */
-  bedrockModelId: import.meta.env.VITE_BEDROCK_MODEL_ID || 'global.anthropic.claude-opus-4-7',
+  bedrockModelId: import.meta.env.VITE_BEDROCK_MODEL_ID || 'global.anthropic.claude-opus-5',
 
   /** Default AWS region used when no credentials are provided. */
   defaultRegion: import.meta.env.VITE_DEFAULT_REGION || 'us-east-1',

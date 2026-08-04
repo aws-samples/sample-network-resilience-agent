@@ -44,7 +44,6 @@ function seedLoadedGraph() {
     recommendedNodes: [node('r1')],
     recommendedEdges: [edge('re1')],
     recommendedCurrentNodes: [node('rc1')],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     assessment: {} as any,
     homeAccountName: 'NetworkHub-Prod',
     error: 'stale error',
@@ -119,7 +118,6 @@ describe('resetTopology', () => {
       edgeReconnectOverrides: new Map([['e', { source: 'x', target: 'y' }]]),
       userCustomerSites: [node('site-1')],
       hiddenCustomerSiteIds: new Set(['site-hidden']),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       utilizationCache: new Map([[30, { vif: new Map(), connection: new Map() }]]) as any,
       showUtilization: true,
     });

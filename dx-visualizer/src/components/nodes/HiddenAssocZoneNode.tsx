@@ -114,6 +114,10 @@ export function HiddenAssocZoneNode({ data }: NodeProps) {
       </button>
 
       {expanded && (
+        /* Pointer handlers only stop React Flow claiming the gesture as a drag so the
+           table stays selectable — the body is read-only, so there is no action to
+           expose to the keyboard. */
+        /* eslint-disable-next-line jsx-a11y/no-static-element-interactions */
         <div
           className={`pointer-events-auto px-3.5 py-2.5 selectable-text${isLocked ? ' nodrag nopan' : ''}`}
           onMouseDown={isLocked ? (e) => e.stopPropagation() : undefined}

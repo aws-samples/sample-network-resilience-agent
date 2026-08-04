@@ -179,42 +179,6 @@ export function ruleNoVpnBackup(topology: TopologyData): RuleResult {
   };
 }
 
-// --- Rule: Cross-region network path (DX region differs from resource region) ---
-export function ruleCrossRegionPath(topology: TopologyData): RuleResult {
-  const dxRegions = new Set<string>();
-  for (const conn of topology.connections) {
-    if (conn.region) dxRegions.add(conn.region);
-  }
-  if (dxRegions.size === 0) return { annotations: [], recommendation: null };
-
-  const resourceRegions = new Set<string>();
-  for (const vpc of topology.vpcs) {
-    if (vpc.region) resourceRegions.add(vpc.region);
-  }
-  for (const tgw of topology.transitGateways) {
-    const region = tgw.transitGatewayArn?.split(':')[3];
-    if (region) resourceRegions.add(region);
-  }
-  if (resourceRegions.size === 0) return { annotations: [], recommendation: null };
-
-  const uncoveredRegions = [...resourceRegions].filter((r) => !dxRegions.has(r));
-  if (uncoveredRegions.length === 0) return { annotations: [], recommendation: null };
-
-  return {
-    annotations: [],
-    recommendation: {
-      id: 'bp-cross-region-path',
-      ruleId: 'cross-region-path',
-      category: 'bestpractice',
-      severity: 'info',
-      title: 'Cross-Region Network Path Detected',
-      description: `Your Direct Connect connections terminate in ${[...dxRegions].join(', ')} but resources exist in ${uncoveredRegions.join(', ')}. The DX SLA covers the connection segment between your on-premises network and the AWS DX location. Traffic routed cross-region over the AWS backbone has separate availability characteristics and is not covered by the Direct Connect SLA. Consider provisioning Direct Connect connections in each resource region for end-to-end SLA coverage.`,
-      additionalNodes: [],
-      additionalEdges: [],
-    },
-  };
-}
-
 // --- Rule: SLA tier awareness (guidance-only) ---
 export function ruleSlaAwareness(topology: TopologyData): RuleResult {
   if (topology.connections.length === 0 && topology.virtualInterfaces.length === 0) {
@@ -661,7 +625,6 @@ export function getAllBestPracticeResults(topology: TopologyData): {
     ruleVifDown(topology),
     ruleConnectionNotAvailable(topology),
     ruleNoVpnBackup(topology),
-    ruleCrossRegionPath(topology),
     ruleSlaAwareness(topology),
     ruleResiliencyToolkit(topology),
     ruleConsistentPrefixAdvertisement(topology),

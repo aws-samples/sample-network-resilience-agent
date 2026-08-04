@@ -107,15 +107,13 @@ export const GuidedTour = forwardRef<GuidedTourHandle>(function GuidedTour(_, re
   const light = useIsLight();
 
   const run = useCallback(() => {
-    let d: Driver | null = null;
-
     const filteredSteps = steps.filter((step) => {
       const selector = step.element;
       if (typeof selector !== 'string') return true;
       return !!document.querySelector(selector);
     });
 
-    d = driver({
+    const d: Driver = driver({
       showProgress: true,
       allowClose: true,
       overlayOpacity: light ? 0.45 : 0.65,
@@ -142,10 +140,11 @@ export const GuidedTour = forwardRef<GuidedTourHandle>(function GuidedTour(_, re
   useImperativeHandle(ref, () => ({ start: run }), [run]);
 
   useEffect(() => {
-    let seen = false;
+    let seen: boolean;
     try {
       seen = localStorage.getItem(STORAGE_KEY) === '1';
     } catch {
+      // localStorage unavailable — treat as already seen so the tour stays quiet.
       seen = true;
     }
     if (seen) return;

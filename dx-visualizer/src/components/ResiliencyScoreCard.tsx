@@ -314,58 +314,6 @@ function buildChecklist(
     });
   }
 
-  const hasCrossRegion = recommendations.some((r) => r.ruleId === 'cross-region-path');
-  if (hasCrossRegion && topology) {
-    const dxRegions = [...new Set(topology.connections.map((c) => c.region).filter(Boolean))] as string[];
-    const resourceRegions = [
-      ...new Set([
-        ...topology.vpcs.map((v) => v.region),
-        ...topology.transitGateways.map((t) => t.transitGatewayArn?.split(':')[3]).filter(Boolean),
-      ]),
-    ].filter((r) => !dxRegions.includes(r as string)) as string[];
-
-    const regionBadge = (region: string, variant: 'dx' | 'resource') => (
-      <span
-        key={region}
-        className={`inline-flex px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold ${
-          variant === 'dx'
-            ? (light ? 'bg-cyan-100 text-cyan-700' : 'bg-cyan-500/20 text-cyan-300')
-            : (light ? 'bg-blue-100 text-blue-700' : 'bg-blue-500/20 text-blue-300')
-        }`}
-      >
-        {region}
-      </span>
-    );
-
-    const locationsDocLink = (
-      <a
-        href="https://aws.amazon.com/directconnect/locations/"
-        target="_blank"
-        rel="noopener noreferrer"
-        className={`underline underline-offset-2 font-medium ${light ? 'text-blue-600 hover:text-blue-700' : 'text-blue-400 hover:text-blue-300'}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        AWS Direct Connect Locations
-      </a>
-    );
-
-    bestPracticeChecklist.push({
-      label: 'Ensure Direct Connect is provisioned in every resource region',
-      met: false,
-      detail: (
-        <span>
-          Direct Connect terminates in {dxRegions.map((r) => regionBadge(r, 'dx'))}, but workloads also run in{' '}
-          {resourceRegions.map((r, i) => (
-            <span key={r}>{i > 0 && ', '}{regionBadge(r, 'resource')}</span>
-          ))}
-          . The Direct Connect SLA covers only the connection endpoint — cross-region traffic traverses the AWS global backbone, which carries a separate availability profile. Consider provisioning a Direct Connect connection in each region where workloads run. See {slaDocLink} and {locationsDocLink}.
-        </span>
-      ),
-      severity: 'info',
-      group: 'architecture',
-    });
-  }
-
   // Link helpers for the new info cards below. Reuses the same styling used
   // for `bfdDocLink` / `slaDocLink` above so every doc reference looks consistent.
   const link = (href: string, text: string) => (
@@ -1710,9 +1658,16 @@ export function ResiliencyScoreCard() {
     <>
       {/* Fullscreen modal */}
       {fullscreen && (
-        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
-        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setFullscreen(false)}>
-          <div className={`absolute inset-0 ${light ? 'bg-black/30' : 'bg-black/60'}`} />
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* The dim layer is a sibling of the panel rather than its ancestor,
+              so it can own click-to-dismiss directly and the panel needs no
+              stopPropagation. Deliberately not focusable — the focus trap
+              already closes the dialog on Escape. */}
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
+          <div
+            className={`absolute inset-0 ${light ? 'bg-black/30' : 'bg-black/60'}`}
+            onClick={() => setFullscreen(false)}
+          />
           <div
             ref={fullscreenTrapRef}
             role="dialog"
@@ -1721,7 +1676,6 @@ export function ResiliencyScoreCard() {
             className={`relative w-[90vw] max-w-2xl max-h-[85vh] rounded-xl border shadow-2xl flex flex-col ${
               light ? 'bg-gray-100 border-gray-300' : 'bg-slate-800 border-slate-600'
             }`}
-            onClick={(e) => e.stopPropagation()}
           >
             {/* Modal header */}
             <div className={`flex items-center justify-between px-5 py-4 border-b shrink-0 ${light ? 'border-gray-200' : 'border-slate-600'}`}>

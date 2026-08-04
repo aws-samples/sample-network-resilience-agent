@@ -14,6 +14,12 @@ import { COLORS } from './utils/colors';
 import { useSessionTimeout } from './hooks/useSessionTimeout';
 import { useUnloadCleaner } from './hooks/useUnloadCleaner';
 
+// Divider bounds as a percentage of the window width — shared by the drag
+// clamp, the arrow-key step, and the separator's aria-value range.
+const MIN_DIVIDER_PCT = 30;
+const MAX_DIVIDER_PCT = 85;
+const DIVIDER_KEY_STEP = 2;
+
 export default function App() {
   const { loadTopology } = useTopology();
   const isLoading = useTopologyStore((s) => s.isLoading);
@@ -49,7 +55,12 @@ export default function App() {
 
   useUnloadCleaner(!!credentials, clearChat);
 
-  useEffect(() => {
+  // Adjust the sign-out banners the moment the credentials change, during
+  // render rather than in an effect — an effect would paint one frame with the
+  // stale "session expired" notice still up after a successful reconnect.
+  const [prevCredentials, setPrevCredentials] = useState(credentials);
+  if (credentials !== prevCredentials) {
+    setPrevCredentials(credentials);
     if (credentials) {
       setSessionExpired(false);
       // Clear the dismissed flag while signed in so next sign-out shows the
@@ -57,7 +68,7 @@ export default function App() {
       // state is invisible until the credentials go away.
       setWelcomeDismissed(false);
     }
-  }, [credentials]);
+  }
 
   // Cold start renders an empty canvas behind the welcome banner — the user
   // must pick "Connect AWS" or "Use demo data" before any topology loads.
@@ -76,8 +87,15 @@ export default function App() {
     cancelAnimationFrame(rafId.current);
     rafId.current = requestAnimationFrame(() => {
       const pct = (e.clientX / window.innerWidth) * 100;
-      setDividerX(Math.max(30, Math.min(85, pct)));
+      setDividerX(Math.max(MIN_DIVIDER_PCT, Math.min(MAX_DIVIDER_PCT, pct)));
     });
+  };
+
+  const handleDividerKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === 'ArrowLeft' ? -DIVIDER_KEY_STEP : e.key === 'ArrowRight' ? DIVIDER_KEY_STEP : 0;
+    if (!step) return;
+    e.preventDefault();
+    setDividerX((v) => Math.max(MIN_DIVIDER_PCT, Math.min(MAX_DIVIDER_PCT, v + step)));
   };
 
   const handleMouseUp = () => {
@@ -250,10 +268,26 @@ export default function App() {
           {/* Divider + Chat */}
           {chatOpen && (
             <>
+              {/* WAI-ARIA window-splitter pattern, same as the chat input's
+                  resize handle: a focusable `separator` carrying aria-valuenow
+                  and resized with the arrow keys. jsx-a11y models every
+                  separator as non-interactive, so both rules below are false
+                  positives here — dropping tabIndex would remove the only
+                  keyboard path to resize. */}
+              {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
               <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize chat panel (drag, or use arrow keys)"
+                aria-valuenow={Math.round(dividerX)}
+                aria-valuemin={MIN_DIVIDER_PCT}
+                aria-valuemax={MAX_DIVIDER_PCT}
+                tabIndex={0}
                 className={`w-1 hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 z-10 ${light ? 'bg-gray-300' : 'bg-slate-700'}`}
                 onMouseDown={handleMouseDown}
+                onKeyDown={handleDividerKeyDown}
               />
+              {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
               <div className="flex-1 min-w-0" style={{ width: `${100 - dividerX}%` }}>
                 <ChatPanel />
               </div>

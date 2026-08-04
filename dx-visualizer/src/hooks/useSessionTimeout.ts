@@ -4,16 +4,31 @@ const SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const WARNING_OFFSET_MS = 60 * 1000; // warn 60s before expiry
 
 export function useSessionTimeout(isActive: boolean, onExpire: () => void) {
-  const lastActivityRef = useRef(Date.now());
+  // Seeded by the effect below when the session goes active; never read before then.
+  const lastActivityRef = useRef(0);
   const onExpireRef = useRef(onExpire);
-  onExpireRef.current = onExpire;
   const expiredRef = useRef(false);
 
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
+  // Drop any in-flight warning the moment isActive flips (sign-out / re-connect),
+  // adjusting state during render rather than in an effect so the countdown can't
+  // be observed for a frame after the session ended.
+  const [wasActive, setWasActive] = useState(isActive);
+  if (wasActive !== isActive) {
+    setWasActive(isActive);
+    setSecondsLeft(null);
+  }
+
+  // Keep the latest callback in a ref (written after commit, not during render) so
+  // the interval below isn't torn down and restarted whenever the caller passes a
+  // fresh closure — that would reset the idle countdown on every App re-render.
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+  }, [onExpire]);
+
   useEffect(() => {
     if (!isActive) {
-      setSecondsLeft(null);
       expiredRef.current = false;
       return;
     }
