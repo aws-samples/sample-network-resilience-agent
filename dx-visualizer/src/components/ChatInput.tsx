@@ -140,6 +140,11 @@ export function ChatInput({ onSend, onStop, disabled }: Props) {
 
   return (
     <div className={`relative flex items-end gap-2 p-3 pt-2 border-t ${light ? 'border-gray-300 bg-gray-100' : 'border-slate-700 bg-slate-800'}`}>
+      {/* WAI-ARIA window-splitter pattern: a focusable `separator` carrying
+          aria-valuenow, resized with the arrow keys. jsx-a11y models every
+          separator as non-interactive, so both rules below are false positives
+          here — dropping tabIndex would remove the only keyboard path to resize. */}
+      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
       <div
         role="separator"
         aria-orientation="horizontal"
@@ -165,6 +170,7 @@ export function ChatInput({ onSend, onStop, disabled }: Props) {
           }`}
         />
       </div>
+      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
       <label htmlFor="chat-input" className="sr-only">Ask about resiliency improvements</label>
       <textarea
         id="chat-input"

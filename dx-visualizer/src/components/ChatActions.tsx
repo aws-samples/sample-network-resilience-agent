@@ -19,6 +19,9 @@ function parseActions(content: string): ParsedAction[] {
   return actions;
 }
 
+// Lives here rather than in its own module because it shares ACTION_RE with
+// parseActions below; the cost is that this file opts out of fast refresh.
+// eslint-disable-next-line react-refresh/only-export-components
 export function stripActionMarkers(content: string): string {
   return content.replace(ACTION_RE, '').trimEnd();
 }

@@ -90,6 +90,9 @@ export function CustomerSiteNode({ id, data }: NodeProps) {
           <div style={{ color: light ? '#374151' : '#ffffff', opacity: labelOpacity }}>
             <OnPremiseIcon size={14} />
           </div>
+          {/* Pointer handlers only stop React Flow claiming the gesture as a drag so the
+              zone name stays selectable — no action fires, nothing to expose to the keyboard. */}
+          {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
           <span
             className={`text-[10px] font-bold flex-1 min-w-0 truncate selectable-text${isLocked ? ' nodrag nopan' : ''}`}
             style={{ color: light ? '#374151' : '#ffffff', opacity: labelOpacity, pointerEvents: 'auto' }}

@@ -207,7 +207,6 @@ const TIER_REF_TITLES = new Set([
 const OP_RULES_WITH_REF_EQUIVALENT = new Set([
   'bfd-guidance',
   'no-vpn-backup',
-  'cross-region-path',
 ]);
 
 const RULE_CATEGORY: Record<string, BpCategory> = {
@@ -217,7 +216,6 @@ const RULE_CATEGORY: Record<string, BpCategory> = {
   'no-vpn-backup': 'architecture',
   'cgw-redundancy': 'architecture',
   'dx-partner-diversity': 'architecture',
-  'cross-region-path': 'architecture',
   'bgp-route-limit': 'configuration',
   'enterprise-support-required': 'architecture',
   'well-architected-review-required': 'architecture',
@@ -276,16 +274,6 @@ const REFERENCE_ITEMS: ReferenceItem[] = [
       if (s.vpnCount === 0) return { status: 'gap' };
       const ids = t.vpnConnections.map((v) => v.vpnConnectionId).filter(Boolean);
       return { status: 'applied', evidence: ids };
-    },
-  },
-  {
-    title: 'Match DX region to resource region',
-    detail: 'Traffic that leaves the DX region rides the AWS backbone and is not covered by the DX SLA.',
-    category: 'architecture',
-    classify: (s, uncovered) => {
-      if (s.dxRegions.length === 0 || s.resourceRegions.length === 0) return { status: 'attest' };
-      if (uncovered.length > 0) return { status: 'gap' };
-      return { status: 'applied', evidence: s.dxRegions };
     },
   },
   {
@@ -938,28 +926,6 @@ function buildHtmlReport(topology: TopologyData, assessment: CombinedAssessment,
   <table>
     <thead><tr><th>Location</th><th style="text-align:right">AWS Logical Devices</th></tr></thead>
     <tbody>${locationRows}</tbody>
-  </table>
-
-  <h3>Regions</h3>
-  <table>
-    <thead><tr><th>Category</th><th>Regions</th><th style="text-align:right">Count</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>DX regions</strong></td>
-        <td>${stats.dxRegions.length ? stats.dxRegions.map((r) => `<span class="region-chip">${escapeHtml(r)}</span>`).join('') : '<span class="empty">None</span>'}</td>
-        <td class="num">${stats.dxRegions.length}</td>
-      </tr>
-      <tr>
-        <td><strong>Resource regions</strong></td>
-        <td>${stats.resourceRegions.length ? stats.resourceRegions.map((r) => `<span class="region-chip">${escapeHtml(r)}</span>`).join('') : '<span class="empty">None</span>'}</td>
-        <td class="num">${stats.resourceRegions.length}</td>
-      </tr>
-      <tr>
-        <td><strong>Resource regions without local DX</strong></td>
-        <td>${uncoveredRegions.length ? uncoveredRegions.map((r) => `<span class="region-chip" style="border-color:${SEVERITY_COLOR.warning};color:${SEVERITY_COLOR.warning}">${escapeHtml(r)}</span>`).join('') : '<span class="empty">None &mdash; all resource regions have local DX</span>'}</td>
-        <td class="num" style="${uncoveredRegions.length ? `color:${SEVERITY_COLOR.warning}` : ''}">${uncoveredRegions.length}</td>
-      </tr>
-    </tbody>
   </table>
 
   <footer>

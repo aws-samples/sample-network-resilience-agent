@@ -89,9 +89,14 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
   // another). The disclaimer copy is different in imported mode and is
   // load-bearing — the SA needs to see the "frozen at export time" warning
   // even if they previously dismissed the live-mode disclaimer.
-  useEffect(() => {
+  //
+  // Done during render rather than in an effect: an effect would paint one frame
+  // with the previous mode's disclaimer still dismissed.
+  const [prevImportedSnapshot, setPrevImportedSnapshot] = useState(importedSnapshot);
+  if (importedSnapshot !== prevImportedSnapshot) {
+    setPrevImportedSnapshot(importedSnapshot);
     setDismissedStatusDisclaimer(false);
-  }, [importedSnapshot]);
+  }
 
   const handleExportImage = async () => {
     setOverflowOpen(false);

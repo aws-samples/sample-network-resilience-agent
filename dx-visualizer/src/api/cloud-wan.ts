@@ -67,6 +67,7 @@ async function recoverAttachmentsFromRawResponse(err: unknown): Promise<CloudWan
     try { bodyText = await (body as { transformToString: () => Promise<string> }).transformToString(); } catch { /* ignore */ }
   }
   if (!bodyText) return null;
+  // eslint-disable-next-line no-control-regex -- the control characters are the point: this class is what we strip out
   const sanitized = bodyText.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
   try {
     const parsed = JSON.parse(sanitized) as { Attachments?: Array<Record<string, unknown>> };

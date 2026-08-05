@@ -6,6 +6,128 @@ import {
 import type { AwsCredentials, DxMaintenanceEvent } from '../types/aws-resources';
 import { createHealthClient } from './aws-client';
 
+/** Safety valve so a malformed nextToken loop can never spin forever. */
+const MAX_PAGES = 25;
+
+/** Largest page the Health API accepts (all three Describe* calls). */
+const PAGE_SIZE = 100;
+
+/**
+ * DescribeEventDetails accepts at most 10 event ARNs per call — it is a batch
+ * API, NOT a paginated one, so a longer list is rejected rather than truncated.
+ */
+const EVENT_DETAILS_BATCH = 10;
+
+/**
+ * Drain a token-paginated Health call.
+ *
+ * Every Describe* call in this API returns a partial page plus a `nextToken`,
+ * and callers that ignore the token lose data silently — no error, just a short
+ * array that looks complete. Routing all of them through one helper means the
+ * mistake can only be made once.
+ */
+async function drainPages<T>(
+  label: string,
+  fetchPage: (nextToken: string | undefined) => Promise<{ items: T[]; nextToken?: string }>,
+): Promise<T[]> {
+  const all: T[] = [];
+  let nextToken: string | undefined;
+  let pages = 0;
+
+  do {
+    const { items, nextToken: token } = await fetchPage(nextToken);
+    all.push(...items);
+    nextToken = token;
+    pages++;
+  } while (nextToken && pages < MAX_PAGES);
+
+  if (nextToken) {
+    console.warn(
+      `[AWS] Health: stopped paging ${label} at ${MAX_PAGES} pages; some results may be missing`,
+    );
+  }
+
+  return all;
+}
+
+/** Split a list into fixed-size batches for a batch (non-paginated) API. */
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Page through DescribeAffectedEntities until AWS stops handing back a token.
+ *
+ * This MUST paginate. The API caps a page at 10 entities and returns a
+ * `nextToken` for the rest, and one call carries entities for *every* event ARN
+ * in the filter — so the cap is shared across all of them, not per event. A
+ * single unpaginated call therefore doesn't just truncate the tail: events that
+ * sort last get ZERO entities and look unaffected, while an event straddling the
+ * page boundary shows a partial list that reads as complete. Observed live
+ * against a 5-event account: one call returned 10 of 18 entities, leaving two
+ * events empty and silently dropping 5 of one event's 10 resources.
+ */
+async function fetchAllAffectedEntities(
+  client: ReturnType<typeof createHealthClient>,
+  eventArns: string[],
+): Promise<{ eventArn?: string; entityValue?: string }[]> {
+  return drainPages('affected entities', async (nextToken) => {
+    const res = await client.send(
+      new DescribeAffectedEntitiesCommand({
+        filter: { eventArns },
+        maxResults: PAGE_SIZE,
+        nextToken,
+      }),
+    );
+    return { items: res.entities ?? [], nextToken: res.nextToken };
+  });
+}
+
+/**
+ * Fetch every scheduled-change DX event, following pagination.
+ *
+ * `maxResults` is only a page size, never a total: an account with more events
+ * than fit one page would otherwise have the remainder disappear from the
+ * calendar.
+ */
+async function fetchAllEvents(client: ReturnType<typeof createHealthClient>) {
+  return drainPages('events', async (nextToken) => {
+    const res = await client.send(
+      new DescribeEventsCommand({
+        filter: {
+          services: ['DIRECTCONNECT'],
+          eventTypeCategories: ['scheduledChange'],
+          // Only currently-relevant events (upcoming or in-progress)
+          eventStatusCodes: ['upcoming', 'open'],
+        },
+        maxResults: PAGE_SIZE,
+        nextToken,
+      }),
+    );
+    return { items: res.events ?? [], nextToken: res.nextToken };
+  });
+}
+
+/**
+ * Fetch descriptions for every event ARN, in batches.
+ *
+ * Unlike the other two calls this one is NOT paginated — it takes at most 10
+ * event ARNs and rejects a longer list outright, so the ARNs must be chunked.
+ */
+async function fetchAllEventDetails(
+  client: ReturnType<typeof createHealthClient>,
+  eventArns: string[],
+) {
+  const batches = await Promise.all(
+    chunk(eventArns, EVENT_DETAILS_BATCH).map((arns) =>
+      client.send(new DescribeEventDetailsCommand({ eventArns: arns })),
+    ),
+  );
+  return batches.flatMap((res) => res.successfulSet ?? []);
+}
+
 /**
  * Fetch scheduled AWS Direct Connect maintenance events via the AWS Health API.
  *
@@ -19,19 +141,7 @@ export async function fetchDxMaintenanceEvents(
   try {
     const client = createHealthClient(creds);
 
-    const eventsRes = await client.send(
-      new DescribeEventsCommand({
-        filter: {
-          services: ['DIRECTCONNECT'],
-          eventTypeCategories: ['scheduledChange'],
-          // Only currently-relevant events (upcoming or in-progress)
-          eventStatusCodes: ['upcoming', 'open'],
-        },
-        maxResults: 50,
-      }),
-    );
-
-    const events = eventsRes.events ?? [];
+    const events = await fetchAllEvents(client);
     if (events.length === 0) {
       console.log('[AWS] Health: no Direct Connect maintenance events');
       return [];
@@ -40,20 +150,20 @@ export async function fetchDxMaintenanceEvents(
     const eventArns = events.map((e) => e.arn).filter((a): a is string => !!a);
 
     // Fetch descriptions and affected entity IDs in parallel
-    const [detailsRes, entitiesRes] = await Promise.all([
-      client.send(new DescribeEventDetailsCommand({ eventArns })),
-      client.send(new DescribeAffectedEntitiesCommand({ filter: { eventArns } })),
+    const [eventDetails, affectedEntities] = await Promise.all([
+      fetchAllEventDetails(client, eventArns),
+      fetchAllAffectedEntities(client, eventArns),
     ]);
 
     const descriptionByArn = new Map<string, string>();
-    for (const detail of detailsRes.successfulSet ?? []) {
+    for (const detail of eventDetails) {
       if (detail.event?.arn && detail.eventDescription?.latestDescription) {
         descriptionByArn.set(detail.event.arn, detail.eventDescription.latestDescription);
       }
     }
 
     const entitiesByArn = new Map<string, string[]>();
-    for (const ent of entitiesRes.entities ?? []) {
+    for (const ent of affectedEntities) {
       if (!ent.eventArn || !ent.entityValue) continue;
       const list = entitiesByArn.get(ent.eventArn) ?? [];
       list.push(ent.entityValue);

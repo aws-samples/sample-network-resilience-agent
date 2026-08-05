@@ -2,7 +2,12 @@ import { useEffect, useRef } from 'react';
 
 export function useUnloadCleaner(isActive: boolean, onUnload: () => void) {
   const onUnloadRef = useRef(onUnload);
-  onUnloadRef.current = onUnload;
+
+  // Keep the latest callback in a ref (written after commit, not during render)
+  // so the pagehide listener below isn't torn down and re-bound on every render.
+  useEffect(() => {
+    onUnloadRef.current = onUnload;
+  }, [onUnload]);
 
   useEffect(() => {
     if (!isActive) return;

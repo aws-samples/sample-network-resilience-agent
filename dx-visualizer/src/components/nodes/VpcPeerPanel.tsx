@@ -82,6 +82,10 @@ export function VpcPeerPanel({ peers, onClose, nodeId }: VpcPeerPanelProps) {
   const accountColor = light ? '#d97706' : '#fbbf24';
 
   const panelContent = (
+    // onClick here only isolates the panel from the React Flow canvas underneath;
+    // it is not an activation target, so role/tabIndex would add a bogus tab stop.
+    // The Close button is the keyboard path out.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       className="fixed tgw-route-scroll"
       style={{

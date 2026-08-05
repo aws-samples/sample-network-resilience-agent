@@ -84,6 +84,9 @@ export function RegionNode({ id, data }: NodeProps) {
         <div style={{ color: headerTextColor }}>
           <RegionFlagIcon size={16} />
         </div>
+        {/* Pointer handlers only stop React Flow claiming the gesture as a drag so the
+            region label stays selectable — no action fires, nothing to expose to the keyboard. */}
+        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
         <div
           className={`flex items-center gap-1.5 selectable-text${isLocked ? ' nodrag nopan' : ''}`}
           style={{ pointerEvents: 'auto' }}

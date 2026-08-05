@@ -187,7 +187,7 @@ For the full rule-by-rule reference — every resiliency rule and best-practice 
 
 ## 6. AI Chat Agent
 
-The chat panel connects to **Amazon Bedrock** (Claude Opus 4.7 via ConverseStream API with cross-region inference).
+The chat panel connects to **Amazon Bedrock** (Claude Opus 5 via ConverseStream API with cross-region inference).
 
 ![Chat Interface](docs/images/Chat.png)
 
@@ -197,12 +197,12 @@ The model is set at build time via the `VITE_BEDROCK_MODEL_ID` environment varia
 
 1. Set `VITE_BEDROCK_MODEL_ID` in your `.env` to the target base model ID, e.g.:
    ```
-   VITE_BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-7
+   VITE_BEDROCK_MODEL_ID=global.anthropic.claude-opus-5
    ```
 2. Rebuild the app (`npm run build`) — Vite env vars are baked in at build time, so a rebuild (or dev-server restart) is required for the change to take effect.
 3. Enable **Model access** for that model in the [Bedrock console](https://console.aws.amazon.com/bedrock/home#/modelaccess) for the AWS region you connect with.
 
-If the value has no inference-profile prefix, a cross-region prefix (`us.` / `eu.` / `apac.`) is auto-prepended based on your AWS region; a value that already starts with `global.` / `us.` / `eu.` / `apac.` is used verbatim. When unset, the app defaults to `global.anthropic.claude-opus-4-7`. See [Configuration in SETUP.md](dx-visualizer/docs/SETUP.md#8-configuration) for the full environment variable reference.
+If the value has no inference-profile prefix, a cross-region prefix (`us.` / `eu.` / `apac.`) is auto-prepended based on your AWS region; a value that already starts with `global.` / `us.` / `eu.` / `apac.` is used verbatim. When unset, the app defaults to `global.anthropic.claude-opus-5`. See [Configuration in SETUP.md](dx-visualizer/docs/SETUP.md#8-configuration) for the full environment variable reference.
 
 ### 6.2 Chat Features
 
