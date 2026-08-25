@@ -7,6 +7,7 @@ import { WELCOME_MESSAGE, type MockScenario } from '../utils/shared';
 import { config } from '../utils/config';
 import { fetchUtilization } from '../api/cloudwatch-utilization';
 import { deserializeTopologyData, type SnapshotFile } from '../utils/snapshot';
+import { normalizeUserEdges } from '../utils/user-edges';
 
 // Metadata exposed to the UI when an imported snapshot is being viewed.
 // Banner / TopBar read this to render the "Viewing imported snapshot" affordances.
@@ -435,6 +436,9 @@ const savedChat = (() => {
 type AdjMaps = {
   incoming: Map<string, { edgeId: string; source: string }[]>;
   outgoing: Map<string, { edgeId: string; target: string }[]>;
+  // `isLateral` edges, keyed by BOTH endpoints. They are deliberately absent
+  // from incoming/outgoing: see computePath.
+  lateral: Map<string, { edgeId: string; peer: string }[]>;
 };
 const currentAdjCache = new WeakMap<DxEdge[], WeakMap<DxEdge[], AdjMaps>>();
 const recommendedAdjCache = new WeakMap<DxEdge[], WeakMap<DxEdge[], WeakMap<DxEdge[], AdjMaps>>>();
@@ -442,13 +446,26 @@ const recommendedAdjCache = new WeakMap<DxEdge[], WeakMap<DxEdge[], WeakMap<DxEd
 function buildAdjMaps(edges: DxEdge[]): AdjMaps {
   const incoming = new Map<string, { edgeId: string; source: string }[]>();
   const outgoing = new Map<string, { edgeId: string; target: string }[]>();
+  const lateral = new Map<string, { edgeId: string; peer: string }[]>();
+  const addLateral = (from: string, edgeId: string, peer: string) => {
+    if (!lateral.has(from)) lateral.set(from, []);
+    lateral.get(from)!.push({ edgeId, peer });
+  };
   for (const e of edges) {
+    if (e.data?.isLateral) {
+      // Recorded from both ends and kept out of the directed graph, so the
+      // traversal can never walk *through* it in whichever direction it was
+      // drawn.
+      addLateral(e.source, e.id, e.target);
+      addLateral(e.target, e.id, e.source);
+      continue;
+    }
     if (!incoming.has(e.target)) incoming.set(e.target, []);
     if (!outgoing.has(e.source)) outgoing.set(e.source, []);
     incoming.get(e.target)!.push({ edgeId: e.id, source: e.source });
     outgoing.get(e.source)!.push({ edgeId: e.id, target: e.target });
   }
-  return { incoming, outgoing };
+  return { incoming, outgoing, lateral };
 }
 
 function getAdjMaps(
@@ -498,7 +515,7 @@ function computePath(
   id: string,
   state: { viewMode: ViewMode; currentEdges: DxEdge[]; recommendedEdges: DxEdge[]; userEdges: DxEdge[] },
 ): { nodes: Set<string>; edges: Set<string> } {
-  const { incoming, outgoing } = getAdjMaps(state.viewMode, state.currentEdges, state.recommendedEdges, state.userEdges);
+  const { incoming, outgoing, lateral } = getAdjMaps(state.viewMode, state.currentEdges, state.recommendedEdges, state.userEdges);
   const nodes = new Set<string>([id]);
   const edges = new Set<string>();
   const upQueue: string[] = [id];
@@ -525,6 +542,26 @@ function computePath(
         nodes.add(target);
         downQueue.push(target);
       }
+    }
+  }
+  // Lateral cables hang off the finished path rather than extending it. A
+  // Customer Link is bidirectional kit-to-kit cabling whose drawn direction is
+  // only a routing choice, so walking it like a path step made the highlight
+  // depend on which end was the upper one: clicking the DX gateway caught the
+  // link (it sits upstream of the lower device) while clicking the AWS device
+  // behind the upper one missed it.
+  //
+  // Attaching it here instead covers it from either side. One hop only — the far
+  // device joins the highlight so the redundant pair reads as related, but its
+  // own upstream and downstream stay out, because the link means "these two back
+  // each other up", not "these two are one path". Iterating a snapshot keeps it
+  // to that one hop.
+  for (const n of [...nodes]) {
+    const sides = lateral.get(n);
+    if (!sides) continue;
+    for (const { edgeId, peer } of sides) {
+      edges.add(edgeId);
+      nodes.add(peer);
     }
   }
   return { nodes, edges };
@@ -1052,7 +1089,9 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   userEdges: (() => {
     try {
       const raw = localStorage.getItem(USER_EDGES_KEY);
-      if (raw) return JSON.parse(raw) as DxEdge[];
+      // Normalized on the way in: a link drawn by an older build comes back
+      // without the `data` flags that build had not defined yet.
+      if (raw) return normalizeUserEdges(JSON.parse(raw) as DxEdge[]);
     } catch { /* ignore */ }
     return [];
   })(),
@@ -1509,7 +1548,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       expandedUnattachedZone: view.expandedUnattachedZone,
       expandedHiddenAssocZone: view.expandedHiddenAssocZone,
 
-      userEdges: cust.userEdges ?? [],
+      userEdges: normalizeUserEdges(cust.userEdges ?? []),
       hiddenEdgeIds,
       edgeReconnectOverrides,
       userCustomerSites: cust.userCustomerSites ?? [],

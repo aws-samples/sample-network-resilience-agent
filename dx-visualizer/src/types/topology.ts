@@ -235,6 +235,13 @@ export type DxEdge = Edge & {
     // highlights only the single edge + its two endpoints, not a full E2E BFS
     // path — a peering is a point-to-point relationship, not an upstream path.
     isPeering?: boolean;
+    // Excludes the edge from the directed path graph: it is a cable between two
+    // devices that back each other up, not a step along anyone's path. The
+    // end-to-end traversal attaches it (and the device at the far end) to a path
+    // it touches, then stops, so the highlight cannot depend on which end the
+    // edge happens to be drawn from. Set on user-drawn Customer Links, whose
+    // direction is a purely cosmetic routing choice.
+    isLateral?: boolean;
     // For VPC↔VPC peering edges: whether both endpoints sit in the SAME region
     // ('intra') or different regions ('cross'). Drives lane routing — intra
     // peerings stay inside their region box with a fixed lane offset; cross

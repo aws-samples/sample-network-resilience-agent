@@ -90,6 +90,12 @@ export function OnPremiseNode({ id, data }: NodeProps) {
       badges={d.badges}
       handles={{ source: true, target: true }}
       extraLeftHandles={[{ id: 'left-source', type: 'source' }]}
+      // Customer-link anchors. Routers all share one column, so a link between
+      // two of them drops vertically instead of looping right→left around both
+      // cards. `planUserEdge` pins every customer link to this pair, so the user
+      // can start the drag from any dot and still get the clean route.
+      extraTopHandles={[{ id: 'top', type: 'target' }]}
+      extraBottomHandles={[{ id: 'bottom', type: 'source' }]}
       topRightOverlay={overlay}
     >
       {d.resourceId && (

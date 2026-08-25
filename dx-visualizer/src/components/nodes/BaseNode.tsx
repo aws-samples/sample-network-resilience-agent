@@ -29,6 +29,14 @@ interface BaseNodeProps {
   // that require a named source handle on the left.
   extraLeftHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
   extraRightHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
+  // Named handles on the card's top/bottom edge, for edges that route vertically
+  // between two nodes in the SAME column. Rendered last, so ReactFlow still
+  // resolves an edge that names no handle to the default left/right pair —
+  // otherwise a vertical handle would capture unqualified edges and send them
+  // out of the top of the card. Anchored to the card rather than the node box so
+  // the dot sits on the visible border, not on the layout padding around it.
+  extraTopHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
+  extraBottomHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
   children?: React.ReactNode;
   nodeId?: string;
   // Rendered absolutely-positioned at the visible node's top-right corner.
@@ -48,6 +56,8 @@ export const BaseNode = memo(function BaseNode({
   targetHandleIds,
   extraLeftHandles,
   extraRightHandles,
+  extraTopHandles,
+  extraBottomHandles,
   children,
   nodeId,
   topRightOverlay,
@@ -227,6 +237,24 @@ export const BaseNode = memo(function BaseNode({
             id={h.id}
             type={h.type}
             position={Position.Right}
+            style={{ background: h.background ?? effectiveBorder, width: 6, height: 6 }}
+          />
+        ))}
+        {extraTopHandles?.map((h) => (
+          <Handle
+            key={h.id}
+            id={h.id}
+            type={h.type}
+            position={Position.Top}
+            style={{ background: h.background ?? effectiveBorder, width: 6, height: 6 }}
+          />
+        ))}
+        {extraBottomHandles?.map((h) => (
+          <Handle
+            key={h.id}
+            id={h.id}
+            type={h.type}
+            position={Position.Bottom}
             style={{ background: h.background ?? effectiveBorder, width: 6, height: 6 }}
           />
         ))}
