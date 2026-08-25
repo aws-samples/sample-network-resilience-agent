@@ -6,6 +6,7 @@ import { PEERING_INTRA_OFFSET, PEERING_CROSS_CLEARANCE } from '../utils/constant
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { useTopologyStore } from '../store/topology-store';
 import { useRedact } from '../utils/redact';
+import { isUserDrawnPair } from '../utils/user-edges';
 
 function useNodeCategory(nodeId: string): string | undefined {
   return useTopologyStore((s) => {
@@ -70,7 +71,10 @@ export function CustomEdge({
   const isHiddenEdge = useTopologyStore((s) => s.hiddenEdgeIds.has(id));
   const sourceCat = useNodeCategory(source);
   const targetCat = useNodeCategory(target);
-  const isDeletableEdge = sourceCat === 'onPremise' && targetCat === 'dxPartnerDevice';
+  // Only user-drawn edges are deletable, and the connect rules decide which those
+  // are — so the × appears on exactly the edges the canvas can create and on
+  // nothing the AWS APIs reported.
+  const isDeletableEdge = isUserDrawnPair(sourceCat, targetCat);
   const hasHoverActive = hoveredNodeId != null;
   const isEdgeHighlighted = hasHoverActive && highlightedEdgeIds.has(id);
   // Don't fade deletable edges — their × affordance must stay readable/clickable.

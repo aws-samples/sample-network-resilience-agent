@@ -16,6 +16,7 @@ import {
 } from '@xyflow/react';
 import { useTopologyStore } from '../store/topology-store';
 import { computeDropSnap } from '../utils/drop-snap';
+import { planUserEdge, isUserDrawnPair, type ConnectEndpoint } from '../utils/user-edges';
 import { CustomerSiteNode } from './nodes/CustomerSiteNode';
 import { OnPremiseNode } from './nodes/OnPremiseNode';
 import { CgwNode } from './nodes/CgwNode';
@@ -485,21 +486,28 @@ export function FlowCanvas() {
         : [...currentNodes, ...userOnPremises];
       const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
 
-      const srcCat = (nodeMap.get(connection.source)?.data as Record<string, unknown>)?.category;
-      const tgtCat = (nodeMap.get(connection.target)?.data as Record<string, unknown>)?.category;
-      if (srcCat !== 'onPremise' || tgtCat !== 'dxPartnerDevice') return;
+      // Absolute Y comes from the live ReactFlow node rather than `nodeMap`, so a
+      // router the user has already dragged is measured where it now sits — that
+      // position decides which end of a customer link is the source.
+      const endpoint = (nodeId: string): ConnectEndpoint | undefined => {
+        const node = nodeMap.get(nodeId);
+        if (!node) return undefined;
+        const live = getNode(nodeId);
+        return {
+          id: nodeId,
+          category: node.data.category,
+          y: live ? getAbsolutePosition(live).y : node.position.y,
+        };
+      };
 
-      const edgeId = `user-${connection.source}-${connection.target}`;
-      addUserEdge({
-        id: edgeId,
-        source: connection.source,
-        target: connection.target,
-        sourceHandle: connection.sourceHandle ?? undefined,
-        targetHandle: connection.targetHandle ?? undefined,
-        type: 'customEdge',
-      });
+      const planned = planUserEdge(
+        endpoint(connection.source),
+        endpoint(connection.target),
+        { sourceHandle: connection.sourceHandle, targetHandle: connection.targetHandle },
+      );
+      if (planned) addUserEdge(planned.edge);
     },
-    [isLocked, isSimulating, viewMode, currentNodes, recommendedNodes, recommendedCurrentNodes, userOnPremises, addUserEdge],
+    [isLocked, isSimulating, viewMode, currentNodes, recommendedNodes, recommendedCurrentNodes, userOnPremises, addUserEdge, getNode, getAbsolutePosition],
   );
 
   const nodes = useMemo(() => {
@@ -829,7 +837,10 @@ export function FlowCanvas() {
     return () => document.removeEventListener('mousedown', handler);
   }, [clearTextSelection]);
 
-  // Delete/Backspace removes the selected edge (only onPremise → dxPartnerDevice)
+  // Delete/Backspace removes the selected edge, for the same user-drawn edges that
+  // carry the × affordance. Both the edge list and the node map have to include
+  // the user's own additions: every deletable edge is in `userEdges` by
+  // definition, and a customer link can land on a router the user added.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (isLocked || isSimulating || !selectedEdgeId) return;
@@ -839,26 +850,26 @@ export function FlowCanvas() {
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
       const allNodes = viewMode === 'recommended' && recommendedCurrentNodes.length > 0
-        ? [...recommendedCurrentNodes, ...recommendedNodes]
-        : [...currentNodes];
+        ? [...recommendedCurrentNodes, ...recommendedNodes, ...userOnPremises]
+        : [...currentNodes, ...userOnPremises];
       const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
 
       const allEdges = viewMode === 'recommended'
-        ? [...currentEdges, ...recommendedEdges]
-        : [...currentEdges];
+        ? [...currentEdges, ...recommendedEdges, ...userEdges]
+        : [...currentEdges, ...userEdges];
       const edge = allEdges.find((ed) => ed.id === selectedEdgeId);
       if (!edge) return;
 
-      const srcCat = (nodeMap.get(edge.source)?.data as Record<string, unknown>)?.category;
-      const tgtCat = (nodeMap.get(edge.target)?.data as Record<string, unknown>)?.category;
-      if (srcCat === 'onPremise' && tgtCat === 'dxPartnerDevice') {
+      const srcCat = (nodeMap.get(edge.source)?.data as Record<string, unknown>)?.category as string | undefined;
+      const tgtCat = (nodeMap.get(edge.target)?.data as Record<string, unknown>)?.category as string | undefined;
+      if (isUserDrawnPair(srcCat, tgtCat)) {
         hideEdge(edge.id);
         setSelectedEdgeId(null);
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [isLocked, isSimulating, selectedEdgeId, viewMode, currentNodes, currentEdges, recommendedNodes, recommendedEdges, recommendedCurrentNodes, hideEdge]);
+  }, [isLocked, isSimulating, selectedEdgeId, viewMode, currentNodes, currentEdges, recommendedNodes, recommendedEdges, recommendedCurrentNodes, userOnPremises, userEdges, hideEdge]);
 
   return (
     <div className="relative w-full h-full" style={{

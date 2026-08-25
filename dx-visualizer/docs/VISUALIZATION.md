@@ -68,6 +68,7 @@ Every node displays an icon, a friendly name, a subtitle, a resource ID, and key
 | Edge | Between | Data Shown |
 |---|---|---|
 | **Physical link** | Customer Gateway → Partner / Customer Device | (no label) — **user-drawn**; not auto-rendered |
+| **Customer Link** | Customer Gateway ↔ Customer Gateway, or Partner / Customer Device ↔ Partner / Customer Device | (no label, same as the physical link) — **user-drawn**; not auto-rendered. Joins two customer-owned devices of the *same* kind. Routes bottom→top between them, and is point-to-point like a peering (hovering highlights the pair, not both devices' full end-to-end paths). Because the cable is bidirectional, it hangs off the end-to-end path rather than extending it: clicking or hovering **any** node on either device's path covers the link and lights up the device at the far end, but stops there rather than pulling that device's own path in |
 | **DX Connection** | Partner / Customer Device → AWS Device | Connection name, connection ID, bandwidth, connection state |
 | **VIF** | AWS Device → DX Gateway or VGW | VIF type (Private/Transit/Public), VLAN ID, VIF ID, VIF state*, BGP status* |
 | **DX GW Association** | DX Gateway → TGW or VGW | Allowed prefix CIDRs, association state* |
@@ -78,6 +79,15 @@ Every node displays an icon, a friendly name, a subtitle, a resource ID, and key
 | **Recommended** | Any gap | Dashed green — suggested resiliency improvement |
 
 \* Only visible when **Live Status** toggle is ON (see [Live Status Layer](#6-live-status-layer))
+
+**Naming note** — the two customer-owned node kinds are easy to mix up, because the names in this table are not the subtitles printed on the cards:
+
+| This table calls it | The card's subtitle reads | Where it sits |
+|---|---|---|
+| Customer Gateway | **Customer Router** | Customer Site container |
+| Partner / Customer Device | **Customer Gateway** | DX Location container |
+
+Both can be linked to others of their own kind, and both offer the same top/bottom handles for it.
 
 All existing edges are solid purple bezier curves with animated flow dots. Recommended edges are dashed green.
 
@@ -148,7 +158,8 @@ The canvas supports a small set of in-place edits that persist in `localStorage`
 | **Remove added Customer Data Center** | Click the `×` button in a user-added zone's header. Only user-added zones expose this affordance — AWS-discovered sites cannot be removed. |
 | **Drag / resize added Customer Data Center** | Once the canvas is unlocked, drag the header to move it or use the corner handles to resize. User-added zones override layout-engine placement. |
 | **Draw Customer Gateway → Partner Device cable** | Drag from a Customer Gateway's right handle to a Partner / Customer Device's left handle. This edge is no longer auto-drawn — the user is responsible for modeling how their on-prem routers cable to the partner demarc. |
-| **Remove a cable** | Hover a Customer Gateway → Partner Device edge to reveal an `×` above the midpoint, or click the edge and press **Delete** / **Backspace**. Hidden edges render as dim dashed lines so you can still see where they used to be. |
+| **Draw a Customer Link** | Drag between any two Customer Gateways (an HA pair inside one data center, or two sites), or between any two Partner / Customer Devices (the customer's own kit across two DX locations). Neither AWS nor the DX APIs report customer-side cabling, so a resiliency reader otherwise cannot tell devices that back each other up from two single points of failure side by side. Both node kinds carry a handle on their top and bottom edge; any handle works as the start, because the edge is always re-anchored bottom→top with the upper device as the source, and drawing it again the other way round is a no-op rather than a second overlapping edge. Mixing the two kinds gives the cross-connect above, not a link. Like the cross-connect, the link is drawn unlabelled — hover the line itself for the point-to-point highlight. |
+| **Remove a cable** | Hover any user-drawn edge — a cross-connect or a Customer Link — to reveal an `×` above the midpoint, or click the edge and press **Delete** / **Backspace**. Only user-drawn edges expose either affordance; AWS-reported edges cannot be removed. Hidden edges render as dim dashed lines so you can still see where they used to be. |
 
 **Reset behavior**: Switching mock scenarios or refreshing live AWS topology wipes all user edits — node IDs change across fetches, so any persisted customizations would render as stray references.
 
