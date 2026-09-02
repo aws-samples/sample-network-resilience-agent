@@ -131,8 +131,8 @@ Remove any optional statements you don't need before creating the policy.
 
 The full list of required permissions is defined in [`docs/iam-policy.json`](./iam-policy.json). In summary, the app needs read-only access to:
 
-- **Direct Connect** — connections, VIFs, DX gateways, associations, association proposals, gateway attachments, locations, LAGs
-- **EC2** — VPCs, VPN gateways, VPN connections, customer gateways, Transit Gateways, TGW attachments, TGW peering attachments, TGW route tables, VPC route tables
+- **Direct Connect** — connections, VIFs, DX gateways, associations, association proposals, gateway attachments, locations, LAGs, plus two `List*` actions covered below
+- **EC2** — VPCs, VPN gateways, VPN connections, customer gateways, Transit Gateways, TGW attachments, TGW peering attachments, TGW route tables, VPC route tables, TGW route-table propagations
 - **Network Manager** — core networks, attachments, peerings, segment routes (Cloud WAN)
 - **CloudWatch** — `GetMetricData` and `ListMetrics` for live BGP prefix counters (fetched with the topology) and on-demand VIF/connection utilization (fetched only when the user toggles **Show utilization** in the Live overlay)
 - **STS** — `GetCallerIdentity` to stamp cost-explorer responses with the account ID
@@ -143,6 +143,36 @@ The full list of required permissions is defined in [`docs/iam-policy.json`](./i
 - **Organizations / IAM** (optional) — `organizations:DescribeAccount` and `iam:ListAccountAliases` to show a friendly account name in the header; both are wrapped in try/catch and fall through silently if denied
 - **STS AssumeRole** (optional) — for cross-account VPC enrichment
 - **SSM** (optional) — `ssm:GetParameters` scoped to `arn:aws:ssm:*::parameter/aws/service/global-infrastructure/*` to resolve region codes (e.g. `ap-northeast-3`) to friendly names (e.g. "Osaka") for region panel labels. This path is AWS's world-readable public-parameter namespace, not customer data. Without this permission the call is caught silently and region panels fall back to a built-in map
+
+> ### ⚠️ `ReadOnlyAccess` is not enough for the BGP route features
+>
+> Three actions the app uses are **`List*` / `Get*`, not `Describe*`**, so a policy built around `directconnect:Describe*` silently omits them:
+>
+> | Action | Powers | In AWS managed `ReadOnlyAccess`? |
+> |---|---|---|
+> | `directconnect:ListVirtualInterfaceRoutes` | **VIF Routes** panel, **DXGW Route diff** panel, and the `⚠ N` failover-gap count on DX Gateway nodes | ❌ No — `ReadOnlyAccess` grants only `directconnect:Describe*` |
+> | `directconnect:ListVirtualInterfaceTestHistory` | **History** button on a VIF edge label (past failover tests) | ❌ No |
+> | `ec2:GetTransitGatewayRouteTablePropagations` | TGW propagation check behind the DXGW propagation rule | ✅ Yes — via `ec2:Get*` |
+>
+> Verified against `arn:aws:iam::aws:policy/ReadOnlyAccess` (v188) with `iam:simulate-principal-policy`. If you attach `ReadOnlyAccess` instead of [`docs/iam-policy.json`](./iam-policy.json), add the two Direct Connect actions in an inline policy, or the route panels stay empty and the gap count never appears:
+>
+> ```json
+> {
+>   "Version": "2012-10-17",
+>   "Statement": [{
+>     "Effect": "Allow",
+>     "Action": [
+>       "directconnect:ListVirtualInterfaceRoutes",
+>       "directconnect:ListVirtualInterfaceTestHistory"
+>     ],
+>     "Resource": "*"
+>   }]
+> }
+> ```
+>
+> Both are read-only. Their mutating siblings `StartBgpFailoverTest` / `StopBgpFailoverTest` force a production BGP peer down and are deliberately **not** used by this app — do not grant them.
+>
+> When `ListVirtualInterfaceRoutes` is denied, the **Routes** and **Route diff** buttons turn red/amber and their tooltip carries the reason rather than opening an empty panel; the failure costs one burst of `AccessDenied` per topology, not one per Live toggle.
 
 ### 4.3 Option A: IAM Identity Center (Recommended)
 
@@ -308,6 +338,8 @@ This requires a trust relationship between the networking account and each spoke
         "directconnect:DescribeDirectConnectGatewayAttachments",
         "directconnect:DescribeLocations",
         "directconnect:DescribeLags",
+        "directconnect:ListVirtualInterfaceRoutes",
+        "directconnect:ListVirtualInterfaceTestHistory",
         "ec2:DescribeVpcs",
         "ec2:DescribeVpnGateways",
         "ec2:DescribeTransitGateways",
@@ -318,6 +350,7 @@ This requires a trust relationship between the networking account and each spoke
         "ec2:DescribeVpnConnections",
         "ec2:DescribeTransitGatewayRouteTables",
         "ec2:SearchTransitGatewayRoutes",
+        "ec2:GetTransitGatewayRouteTablePropagations",
         "ec2:DescribeRouteTables",
         "networkmanager:ListCoreNetworks",
         "networkmanager:GetCoreNetwork",

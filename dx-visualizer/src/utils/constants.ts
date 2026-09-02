@@ -7,6 +7,34 @@ export const LAYOUT = {
   partnerCollapseThreshold: 3,
 };
 
+// --- Hover-path dimming (shared by every off-path element) ---
+// Hovering a node/edge label highlights its whole E2E path and fades everything
+// else. These live here because the fade is applied in six places (BaseNode, the
+// four collapsed-group cards, and CustomEdge's stroke + flow dot + label) and the
+// off-path set has to read as ONE receding layer — when the values drifted apart
+// the canvas looked like two different amounts of "off".
+//
+// Per-element values are deliberately different, because equal alpha does not
+// read as equal prominence: a 2px stroke and its animated dot disappear into the
+// background at an opacity that leaves a filled card clearly legible, and the
+// dot is the most eye-catching thing out there since it moves.
+//
+// Light theme cannot go as far as dark. An off-path card there is near-white on a
+// near-white canvas, so past roughly 0.18 it stops being faint context and simply
+// vanishes — which loses the surrounding topology the highlight is meant to be
+// read against. Dark theme has the room, so it takes it.
+export const HOVER_DIM = {
+  node: { dark: 0.12, light: 0.18 },
+  edge: { dark: 0.06, light: 0.12 },
+  edgeDot: { dark: 0.06, light: 0.12 },
+  edgeLabel: { dark: 0.1, light: 0.16 },
+} as const;
+
+/** Off-path opacity for one element kind in the active theme. */
+export function dimOpacityFor(kind: keyof typeof HOVER_DIM, light: boolean): number {
+  return light ? HOVER_DIM[kind].light : HOVER_DIM[kind].dark;
+}
+
 // --- VPC peering lane geometry (shared by layout-engine + CustomEdge) ---
 // VPC↔VPC peering edges exit the VPC's right handle and bow out into a vertical
 // "lane" to the right of the VPC column, with the pcx label centered on that leg.

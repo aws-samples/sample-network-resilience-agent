@@ -2,10 +2,12 @@ import { useRef, useCallback, useState } from 'react';
 import { BaseEdge, getBezierPath, getSmoothStepPath, EdgeLabelRenderer, Position, useStore, useStoreApi } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
 import { COLORS } from '../utils/colors';
-import { PEERING_INTRA_OFFSET, PEERING_CROSS_CLEARANCE } from '../utils/constants';
+import { PEERING_INTRA_OFFSET, PEERING_CROSS_CLEARANCE, dimOpacityFor } from '../utils/constants';
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { useTopologyStore } from '../store/topology-store';
 import { useRedact } from '../utils/redact';
+import { VifRoutePanel } from '../components/nodes/VifRoutePanel';
+import { isUserDrawnPair } from '../utils/user-edges';
 
 function useNodeCategory(nodeId: string): string | undefined {
   return useTopologyStore((s) => {
@@ -64,13 +66,44 @@ export function CustomEdge({
   const hoveredNodeId = useTopologyStore((s) => s.hoveredNodeId);
   const highlightedEdgeIds = useTopologyStore((s) => s.highlightedEdgeIds);
   const isSpotlit = useTopologyStore((s) => s.spotlightEdgeIds.has(id));
+  // This edge is part of the DXGW route-diff comparison the user narrowed to —
+  // either it carries a picked VIF, or it sits on that VIF's upstream trail back
+  // to the on-premises router (the DX connection, the partner cross-connect), so
+  // the reader can see which physical connection each picked VIF rides on.
+  //
+  // The vifId match stays even though `routeDiffPickedEdgeIds` already covers it:
+  // that set is id-keyed and derived, so it can lag a graph rebuild by a render,
+  // and the VIF edge itself is the one that must never go dark. Matches the edge's
+  // own vifId or any member of an aggregated edge (whose id is synthetic, e.g.
+  // "3-vifs"). Returns a stable boolean so a selection change only re-renders the
+  // edges it actually toggles.
+  const isRouteDiffPicked = useTopologyStore((s) => {
+    if (s.routeDiffPickedVifIds.size === 0) return false;
+    if (s.routeDiffPickedEdgeIds.has(id)) return true;
+    const vid = data?.vifId as string | undefined;
+    if (vid && s.routeDiffPickedVifIds.has(vid)) return true;
+    const agg = data?.aggregatedVifs as { vifId: string }[] | undefined;
+    return agg?.some((av) => s.routeDiffPickedVifIds.has(av.vifId)) ?? false;
+  });
+  // A pick is active somewhere on the canvas. Everything NOT picked steps back so
+  // the picked edges read as a selection rather than as a slightly thicker line —
+  // a glow alone is easy to miss on a dense diagram. Softer than the hover fade
+  // (0.15), because the rest of the topology is still the context for the answer.
+  const isRouteDiffScoped = useTopologyStore((s) => s.routeDiffPickedVifIds.size > 0);
+  const isRouteDiffMuted = isRouteDiffScoped && !isRouteDiffPicked;
+  // Calendar spotlight and route-diff pick are the same visual affordance — "this
+  // is the edge that was just named" — so they render identically from here on.
+  const isGlowLit = isSpotlit || isRouteDiffPicked;
   const setHoveredNode = useTopologyStore((s) => s.setHoveredNode);
   const setHoveredEdge = useTopologyStore((s) => s.setHoveredEdge);
   const hideEdge = useTopologyStore((s) => s.hideEdge);
   const isHiddenEdge = useTopologyStore((s) => s.hiddenEdgeIds.has(id));
   const sourceCat = useNodeCategory(source);
   const targetCat = useNodeCategory(target);
-  const isDeletableEdge = sourceCat === 'onPremise' && targetCat === 'dxPartnerDevice';
+  // Only user-drawn edges are deletable, and the connect rules decide which those
+  // are — so the × appears on exactly the edges the canvas can create and on
+  // nothing the AWS APIs reported.
+  const isDeletableEdge = isUserDrawnPair(sourceCat, targetCat);
   const hasHoverActive = hoveredNodeId != null;
   const isEdgeHighlighted = hasHoverActive && highlightedEdgeIds.has(id);
   // Don't fade deletable edges — their × affordance must stay readable/clickable.
@@ -98,11 +131,56 @@ export function CustomEdge({
   const bgpStatus = data?.bgpStatus as string | undefined;
   const prefixesAccepted = data?.prefixesAccepted as number | undefined;
   const prefixesAdvertised = data?.prefixesAdvertised as number | undefined;
+  const hasRouteData = data?.hasRouteData as boolean | undefined;
   const utilizationIngressBps = data?.utilizationIngressBps as number | undefined;
   const utilizationEgressBps = data?.utilizationEgressBps as number | undefined;
   const connectionBandwidth = data?.connectionBandwidth as string | undefined;
-  const aggregatedVifs = data?.aggregatedVifs as { vifId: string; vifType: string; vlan: number; vifState: string; bgpStatus?: string; prefixesAccepted?: number; prefixesAdvertised?: number; utilizationIngressBps?: number; utilizationEgressBps?: number; connectionBandwidth?: string }[] | undefined;
+  const vifRateLimit = data?.vifRateLimit as string | undefined;
+  const aggregatedVifs = data?.aggregatedVifs as { vifId: string; vifName?: string; vifType: string; vlan: number; vifState: string; bgpStatus?: string; prefixesAccepted?: number; prefixesAdvertised?: number; hasRouteData?: boolean; vifRateLimit?: string; utilizationIngressBps?: number; utilizationEgressBps?: number; connectionBandwidth?: string }[] | undefined;
   const [vifListExpanded, setVifListExpanded] = useState(false);
+  // BGP route panels. On an aggregated edge the panel opens per member VIF, so
+  // the open set is keyed by the real vifId in both cases.
+  const vifId = data?.vifId as string | undefined;
+  const openRoutePanelVifId = useTopologyStore((s) => {
+    if (!vifId || s.expandedVifRoutePanels.size === 0) return undefined;
+    if (s.expandedVifRoutePanels.has(vifId)) return vifId;
+    // Aggregated edges use a synthetic vifId ("3-vifs"); find whichever member
+    // has an open panel so it renders anchored to this edge's label.
+    return aggregatedVifs?.find((av) => s.expandedVifRoutePanels.has(av.vifId))?.vifId;
+  });
+  const toggleVifRoutePanel = useTopologyStore((s) => s.toggleVifRoutePanel);
+  const openRoutes = useTopologyStore((s) =>
+    openRoutePanelVifId ? s.topologyData?.vifRoutes?.get(openRoutePanelVifId) : undefined,
+  );
+  const loadVifRoutes = useTopologyStore((s) => s.loadVifRoutes);
+  const vifRoutesLoading = useTopologyStore((s) => s.vifRoutesLoading);
+  const vifRoutesError = useTopologyStore((s) => s.vifRoutesError);
+  const vifRoutesFetched = useTopologyStore((s) => s.vifRoutesCache != null);
+
+  // There is no top-bar control for routes: in live mode, clicking Routes on an
+  // edge is what triggers the fetch (two paginated calls per VIF, so it must
+  // stay an explicit action). The first click fetches for all VIFs and opens
+  // this one; later clicks are pure cache reads.
+  const onRoutesClick = useCallback(async (targetVifId: string) => {
+    if (!useTopologyStore.getState().vifRoutesCache) {
+      await loadVifRoutes();
+      // Bail if the fetch produced nothing (permission denied, no routes) —
+      // opening an empty panel would look broken.
+      if (!useTopologyStore.getState().vifRoutesCache) return;
+    }
+    toggleVifRoutePanel(targetVifId);
+  }, [loadVifRoutes, toggleVifRoutePanel]);
+
+  // BGP history is driven by the "BGP History" sub-toggle under Live in the top
+  // bar, not a per-edge button: it is a whole-topology question, so one fetch
+  // annotates every VIF edge at once.
+  const showBgpHistory = useTopologyStore((s) => s.showBgpHistory);
+  const vifStability = useTopologyStore((s) =>
+    vifId ? s.topologyData?.bgpStability?.get(vifId) : undefined,
+  );
+  const vifTests = useTopologyStore((s) =>
+    vifId ? s.topologyData?.vifFailoverTests?.get(vifId) : undefined,
+  );
   const edgeStyleKind = data?.edgeStyle as 'smoothstep' | undefined;
 
   // Parallel-edge bowing: several edges connect the SAME two nodes (customer
@@ -344,7 +422,12 @@ export function CustomEdge({
           : (style?.stroke as string) ?? baseEdgeColor;
   const hasStatusIssue = showLiveStatus && (isVifDown || allTunnelsDown || isConnectionDown);
   const hasStatusHealthy = showLiveStatus && !hasStatusIssue && (isVifUp || anyTunnelUp || isConnectionUp);
-  const strokeColor = isEdgeHighlighted
+  // A glow-lit edge takes the highlight blue outright, ahead of live status and
+  // vifType. Without this the trail kept each edge's own colour, so one picked
+  // path rendered as a mix of green (healthy), purple (vifType) and red — which
+  // reads as three unrelated things rather than one selected route. The white
+  // marching ants say "selected"; the stroke underneath has to agree.
+  const strokeColor = isEdgeHighlighted || isGlowLit
     ? '#3b82f6'
     : isFailed
       ? '#ef4444'
@@ -454,35 +537,52 @@ export function CustomEdge({
       {/* Spotlight halo — mirrors `.node-spotlight` ring on nodes so the
           maintenance-calendar dxvif-* chip points at the actual VIF edge,
           not the DXGW it terminates on. Renders below the BaseEdge so the
-          underlying line stays readable. */}
-      {isSpotlit && (
-        <>
-          <path
-            d={edgePath}
-            fill="none"
-            stroke="#ffffff"
-            strokeWidth={6}
-            strokeLinecap="round"
-            opacity={1}
-            strokeDasharray="14 6"
-            className="edge-spotlight-march"
-            style={{ pointerEvents: 'none' }}
-          />
-        </>
+          underlying line stays readable.
+
+          Route-diff picks share it deliberately. Both affordances answer the same
+          question — "this is the edge I just named" — so two different glows on
+          one canvas read as two different kinds of alert. The route-diff path used
+          to draw its own purple pulsing aura plus violet marching ants at a
+          heavier stroke; nothing was wrong with it except that it looked nothing
+          like the calendar's, so a user who had learned one had to learn the
+          other. One style, one meaning. */}
+      {isGlowLit && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="#ffffff"
+          strokeWidth={6}
+          strokeLinecap="round"
+          opacity={1}
+          strokeDasharray="14 6"
+          className="edge-spotlight-march"
+          style={{ pointerEvents: 'none' }}
+        />
       )}
       <BaseEdge
         id={id}
         path={edgePath}
         style={{
-          strokeWidth: isHiddenEdge ? 1.5 : isEdgeHighlighted ? 3.5 : isFailed ? 3 : light ? 2.5 : 2,
+          // No width bump for a route-diff pick: the spotlight march above is the
+          // whole signal, exactly as it is for a calendar spotlight, and thickening
+          // the stroke underneath it made the two look different again.
+          strokeWidth: isHiddenEdge ? 1.5 : isEdgeHighlighted || isGlowLit ? 3.5 : isFailed ? 3 : light ? 2.5 : 2,
           strokeDasharray: isHiddenEdge ? '4 4' : isFailed ? '6 3' : isRecommended ? '8 4' : undefined,
+          // A picked edge stays fully opaque even while a hover dims the rest —
+          // the point is to keep the compared VIFs legible against the fade — and
+          // the unpicked ones step back so the contrast comes from the difference,
+          // not from the halo alone.
           opacity: isHiddenEdge
             ? 0.25
-            : isEdgeDimmed
-              ? 0.15
-              : isEdgeHighlighted
-                ? 1
-                : isFailed ? 0.5 : isRecommended ? 0.7 : (light ? 1 : 0.8),
+            : isRouteDiffPicked
+              ? 1
+              : isEdgeDimmed
+                ? dimOpacityFor('edge', light)
+                : isRouteDiffMuted
+                  ? 0.22
+                  : isEdgeHighlighted
+                    ? 1
+                    : isFailed ? 0.5 : isRecommended ? 0.7 : (light ? 1 : 0.8),
           ...style,
           stroke: strokeColor,
           pointerEvents: isSimulating && !isRecommended ? 'stroke' : undefined,
@@ -491,12 +591,15 @@ export function CustomEdge({
         className={isRecommended ? 'recommended-edge' : undefined}
         interactionWidth={isSimulating ? 20 : undefined}
       />
-      {/* Animated dot traveling along the edge path */}
+      {/* Animated dot traveling along the edge path. It fades with its edge: the
+          dot is the only moving thing on the canvas, so leaving it at full alpha
+          on an off-path edge pulled the eye straight off the highlighted path —
+          the fade around it read as much weaker than it actually was. */}
       {!isRecommended && !isFailed && !isHiddenEdge && (
         <circle
           r="2.5"
           fill={strokeColor}
-          opacity={0.9}
+          opacity={isEdgeDimmed ? dimOpacityFor('edgeDot', light) : 0.9}
           style={{
             offsetPath: `path('${edgePath}')`,
             offsetDistance: '0%',
@@ -514,7 +617,31 @@ export function CustomEdge({
         const hasPrefixData = prefixesAccepted != null || prefixesAdvertised != null;
         const hasPrefixRow = showLiveStatus && !!vifType && (hasPrefixData || hasVifStatusRow);
         const hasUtilRow = showUtilization && (utilizationIngressBps != null || utilizationEgressBps != null);
-        const hasDetailRows = hasVifStatusRow || hasPrefixRow || hasUtilRow;
+        // On a single-VIF edge the toggle targets this VIF. On an aggregated edge
+        // `vifId` is synthetic ("3-vifs"), so fall back to the first member that
+        // actually has routes — the per-VIF rows below expose the rest.
+        // Which VIF the edge-level Routes button targets. Once routes are
+        // fetched, prefer a VIF we know has data. Before that, hasRouteData is
+        // undefined everywhere, so fall back to this edge's own VIF (or the
+        // first member of an aggregate, whose vifId is synthetic) — the button
+        // has to exist pre-fetch, since clicking it is what triggers the fetch.
+        const routesToggleVifId = vifRoutesFetched
+          ? (hasRouteData ? vifId : aggregatedVifs?.find((av) => av.hasRouteData)?.vifId)
+          : (aggregatedVifs?.length ? aggregatedVifs[0].vifId : vifId);
+        // Routes live inside the live-status layer, alongside the prefix counts
+        // they drill into. Only real VIF edges with a BGP session can have routes.
+        const hasRoutesToggle =
+          showLiveStatus
+          && !!vifType
+          && !!routesToggleVifId
+          && !isRecommended
+          && (vifRoutesFetched ? !!routesToggleVifId : !!bgpStatus);
+        // Only render history rows for VIFs the fetch actually covered. A VIF
+        // with no entry was never queried, which is different from "clean".
+        const hasHistoryRow =
+          showLiveStatus && showBgpHistory && !!vifType && !isRecommended
+          && (!!vifStability || !!vifTests);
+        const hasDetailRows = hasVifStatusRow || hasPrefixRow || hasUtilRow || hasRoutesToggle || hasHistoryRow;
         const labelHasVisibleLine = !!label && (showLiveStatus || label.split('\n').some((line) => !/^(VIF|BGP|State):\s/i.test(line)));
         const tunnelsVisible = showLiveStatus && !!tunnels && tunnels.length > 0;
         if (!labelHasVisibleLine && !tunnelsVisible && !hasDetailRows) return null;
@@ -531,7 +658,18 @@ export function CustomEdge({
           return '#ef4444';
         };
 
-        const capBps = parseBandwidthToBps(connectionBandwidth);
+        // A VIF's traffic ceiling is its rate limit when one is set, not the
+        // parent port's bandwidth. Measuring a 50Mbps-limited VIF against a
+        // 10Gbps port reported a saturated VIF as 0.5%, so the amber/red
+        // thresholds could never fire. AWS guarantees rateLimit <= port
+        // bandwidth, but take the min defensively so a bad value can't inflate
+        // the ceiling and under-report utilization.
+        const portBps = parseBandwidthToBps(connectionBandwidth);
+        const rateLimitBps = parseBandwidthToBps(vifRateLimit);
+        const capBps = rateLimitBps != null && portBps != null
+          ? Math.min(rateLimitBps, portBps)
+          : rateLimitBps ?? portBps;
+        const capIsRateLimit = rateLimitBps != null && (portBps == null || rateLimitBps <= portBps);
         const peakBps = Math.max(utilizationIngressBps ?? 0, utilizationEgressBps ?? 0);
         const utilPct = capBps && capBps > 0 && peakBps > 0 ? (peakBps / capBps) * 100 : null;
         const utilColor = utilPct == null
@@ -547,15 +685,24 @@ export function CustomEdge({
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               backgroundColor: light ? 'rgba(255,255,255,0.97)' : '#0f172a',
-              border: `1px solid ${light ? 'rgba(15,23,42,0.10)' : baseLabelBorderColor + '40'}`,
-              boxShadow: light ? '0 1px 2px rgba(15,23,42,0.06), 0 2px 8px rgba(15,23,42,0.06)' : undefined,
+              // A lit edge carries the highlight on its label too: the label is
+              // where the VIF is actually named, so a ring there answers "which
+              // one is lit?" without tracing the line back to its endpoints. The
+              // calendar spotlight gets it as well, not just route-diff picks —
+              // the whole point is that the two look the same.
+              border: isGlowLit
+                ? `1.5px solid ${COLORS.existing.edge}`
+                : `1px solid ${light ? 'rgba(15,23,42,0.10)' : baseLabelBorderColor + '40'}`,
+              boxShadow: isGlowLit
+                ? `0 0 0 3px ${COLORS.existing.edge}${light ? '2e' : '40'}, 0 2px 10px rgba(139,92,246,0.35)`
+                : light ? '0 1px 2px rgba(15,23,42,0.06), 0 2px 8px rgba(15,23,42,0.06)' : undefined,
               borderRadius: 6,
               zIndex: 1001,
               cursor: isSimulating ? undefined : isLocked ? 'text' : 'grab',
               userSelect: isLocked && !isSimulating ? 'text' : 'none',
               pointerEvents: 'all',
-              opacity: isEdgeDimmed ? 0.2 : 1,
-              maxWidth: hasUtilRow ? 220 : 180,
+              opacity: isEdgeDimmed ? dimOpacityFor('edgeLabel', light) : isRouteDiffMuted ? 0.35 : 1,
+              maxWidth: hasUtilRow || hasPrefixRow ? 220 : 180,
               overflowWrap: 'anywhere',
             }}
             onPointerDown={onPointerDown}
@@ -614,24 +761,138 @@ export function CustomEdge({
                   </div>
                 )}
 
+                {/* The label box sets overflowWrap:'anywhere' for long CIDRs and
+                    resource IDs, which also let this row break mid-token — a
+                    squeezed "Pfx" rendered as "Pf" / "x". Each item is nowrap
+                    and the row wraps between items instead. */}
                 {hasPrefixRow && (
                   <div
-                    className="flex items-center justify-center gap-2"
+                    className="flex flex-wrap items-center justify-center gap-x-2"
                     style={{ color: hasPrefixData ? (light ? '#6366f1' : '#818cf8') : (light ? '#94a3b8' : '#64748b'), fontVariantNumeric: 'tabular-nums' }}
                     title="BGP prefixes accepted from peer / advertised to peer"
                   >
-                    <span>Pfx</span>
+                    <span style={{ whiteSpace: 'nowrap' }}>Pfx</span>
                     {hasPrefixData ? (
                       <>
                         {prefixesAccepted != null && (
-                          <span>{prefixesAccepted} <span style={{ opacity: 0.7 }}>accepted</span></span>
+                          <span style={{ whiteSpace: 'nowrap' }}>{prefixesAccepted} <span style={{ opacity: 0.7 }}>accepted</span></span>
                         )}
                         {prefixesAdvertised != null && (
-                          <span>{prefixesAdvertised} <span style={{ opacity: 0.7 }}>advertised</span></span>
+                          <span style={{ whiteSpace: 'nowrap' }}>{prefixesAdvertised} <span style={{ opacity: 0.7 }}>advertised</span></span>
                         )}
                       </>
                     ) : (
                       <span style={{ opacity: 0.6, fontStyle: 'italic' }}>no data</span>
+                    )}
+                  </div>
+                )}
+
+                {hasRoutesToggle && (
+                  <div className="flex items-center justify-center">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); void onRoutesClick(routesToggleVifId!); }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      disabled={vifRoutesLoading}
+                      className="flex items-center gap-0.5 text-[8px] font-semibold rounded px-1"
+                      style={{
+                        color: vifRoutesError && !vifRoutesFetched
+                          ? (light ? '#dc2626' : '#f87171')
+                          : (light ? '#8b5cf6' : '#a78bfa'),
+                        backgroundColor: light ? 'rgba(139,92,246,0.08)' : 'rgba(139,92,246,0.15)',
+                        cursor: vifRoutesLoading ? 'wait' : 'pointer',
+                        border: 'none',
+                      }}
+                      title={
+                        vifRoutesError && !vifRoutesFetched
+                          ? `BGP routes unavailable: ${vifRoutesError}`
+                          : vifRoutesFetched
+                            ? 'Show BGP routes exchanged on this VIF'
+                            : 'Fetch BGP routes for this VIF (ListVirtualInterfaceRoutes)'
+                      }
+                      aria-expanded={!!openRoutePanelVifId}
+                    >
+                      Routes
+                      {vifRoutesLoading ? (
+                        <svg className="w-2 h-2 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden="true">
+                          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                        </svg>
+                      ) : (
+                        <svg
+                          className="w-2 h-2"
+                          style={{ transform: openRoutePanelVifId ? 'rotate(180deg)' : undefined, transition: 'transform 0.15s' }}
+                          viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+                          strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+                        >
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {hasHistoryRow && (
+                  <div className="flex flex-col gap-0.5">
+                    {/* Explicit "BGP flaps" / "Failover test" labels — a bare
+                        "stable 7d" does not say what was measured, and the
+                        window matters because CloudWatch only retains 5-minute
+                        data for 63 days. */}
+                    {vifStability && (
+                      <div className="flex items-center justify-between gap-1.5 text-[8px]">
+                        <span style={{ opacity: 0.7 }}>BGP flaps ({vifStability.windowDays}d)</span>
+                        <span
+                          style={{
+                            fontWeight: 600,
+                            color: vifStability.flapCount > 0
+                              ? (light ? '#b45309' : '#fbbf24')
+                              : (light ? '#15803d' : '#4ade80'),
+                          }}
+                          title={
+                            vifStability.flapCount > 0
+                              ? `Session dropped ${vifStability.flapCount}x in the last ${vifStability.windowDays} days${vifStability.lastFlapAt ? ` (most recent ${vifStability.lastFlapAt.slice(0, 10)})` : ''}. Each drop is a real traffic interruption on this path.`
+                              : `No BGP session drops observed in the last ${vifStability.windowDays} days. CloudWatch retains 5-minute data for 63 days, so older events are not visible at this resolution.`
+                          }
+                        >
+                          {vifStability.flapCount > 0
+                            ? `${vifStability.flapCount}${vifStability.lastFlapAt ? ` · last ${vifStability.lastFlapAt.slice(5, 10)}` : ''}`
+                            : 'none'}
+                        </span>
+                      </div>
+                    )}
+                    {vifTests && (
+                      <div className="flex items-center justify-between gap-1.5 text-[8px]">
+                        <span style={{ opacity: 0.7 }}>Failover test</span>
+                        <span
+                          style={{
+                            fontWeight: 600,
+                            color: vifTests.length === 0
+                              ? (light ? '#b45309' : '#fbbf24')
+                              : (light ? '#15803d' : '#4ade80'),
+                          }}
+                          title={
+                            vifTests.length === 0
+                              ? 'AWS has no BGP failover test on record for this VIF. Only tests started through the AWS API (StartBgpFailoverTest, or the "Bring BGP down" action in the Direct Connect console) are recorded — a manual test done on your own router will not appear here. So this means "no AWS-recorded test", not necessarily "never tested".'
+                              : `${vifTests.length} recorded failover test(s). Most recent: ${
+                                  vifTests
+                                    .map((t) => t.endTime ?? t.startTime)
+                                    .filter(Boolean)
+                                    .sort()
+                                    .at(-1)?.slice(0, 10) ?? 'date unknown'
+                                }.`
+                          }
+                        >
+                          {vifTests.length === 0
+                            ? 'none on record'
+                            : (() => {
+                                const newest = vifTests
+                                  .map((t) => t.endTime ?? t.startTime)
+                                  .filter((d): d is string => !!d)
+                                  .sort()
+                                  .at(-1);
+                                return newest ? newest.slice(0, 10) : `${vifTests.length} on record`;
+                              })()}
+                        </span>
+                      </div>
                     )}
                   </div>
                 )}
@@ -696,7 +957,9 @@ export function CustomEdge({
                           <span style={{ fontWeight: 600 }}>Peak definition:</span> Represents the single highest-utilization hour observed within the {utilizationWindowDays}-day window — not an average. Utilization during other hours may have been significantly lower.
                         </div>
                         <div style={{ marginBottom: 6 }}>
-                          <span style={{ fontWeight: 600 }}>Directional capacity:</span> The percentage reflects the busier direction (ingress or egress) relative to total port bandwidth. Because capacity is shared, the higher-traffic direction determines the saturation point.
+                          <span style={{ fontWeight: 600 }}>Directional capacity:</span> The percentage reflects the busier direction (ingress or egress) relative to {capIsRateLimit
+                            ? `this VIF's ${vifRateLimit} rate limit, which caps it below the ${connectionBandwidth} port`
+                            : 'total port bandwidth'}. Because capacity is shared, the higher-traffic direction determines the saturation point.
                         </div>
                         <div>
                           <span style={{ fontWeight: 600 }}>Data granularity:</span> Each data point is a 1-hour average. As a result, sub-hour microbursts may appear as only a few percent and should not be interpreted as representative of actual peak load.
@@ -724,7 +987,14 @@ export function CustomEdge({
                       </div>
                     )}
                     <div style={{ color: subTextColor, fontSize: 8, lineHeight: 1.1 }}>
-                      {utilizationWindowDays}d peak{capBps ? ` · of ${connectionBandwidth} port` : ''}
+                      {/* Name which ceiling the percentage is measured against —
+                          a rate-limited VIF and its port are very different
+                          denominators, and the number is meaningless without it. */}
+                      {utilizationWindowDays}d peak{capBps
+                        ? capIsRateLimit
+                          ? ` · of ${vifRateLimit} VIF rate limit`
+                          : ` · of ${connectionBandwidth} port`
+                        : ''}
                     </div>
                   </div>
                 )}
@@ -770,12 +1040,33 @@ export function CustomEdge({
                       const avStatusColor = /available/i.test(av.vifState) ? '#22c55e' : '#ef4444';
                       const avBgpColor = av.bgpStatus ? (/up/i.test(av.bgpStatus) ? '#22c55e' : '#ef4444') : '#94a3b8';
                       return (
-                        <div key={av.vifId} className="flex items-center gap-1 text-[8px]" style={{ color: subTextColor }}>
+                        <div key={av.vifId} className="flex flex-wrap items-center gap-x-1 text-[8px]" style={{ color: subTextColor }}>
                           <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', backgroundColor: avStatusColor, flexShrink: 0 }} />
+                          {/* Name then ID, same order as the single-VIF label.
+                              Both are shown because on a hosted-VIF account the
+                              name is often identical to the connection name, so
+                              the ID is what disambiguates. The row wraps rather
+                              than squeezing — a name plus an ID plus VLAN plus
+                              BGP state overruns the label's 220px cap. */}
+                          {av.vifName && av.vifName !== av.vifId && (
+                            <span style={{ color: idColor, fontWeight: 600 }}>{r(av.vifName)}</span>
+                          )}
                           <span style={{ color: idColor }}>{r(av.vifId)}</span>
                           <span>V{av.vlan}</span>
                           {showLiveStatus && av.bgpStatus && (
                             <span style={{ color: avBgpColor, fontWeight: 600 }}>BGP {av.bgpStatus}</span>
+                          )}
+                          {showLiveStatus && av.hasRouteData && (
+                            <button
+                              type="button"
+                              className="nodrag nopan"
+                              style={{ color: light ? '#8b5cf6' : '#a78bfa', cursor: 'pointer', background: 'none', border: 'none', padding: 0, fontWeight: 600 }}
+                              onClick={(e) => { e.stopPropagation(); void onRoutesClick(av.vifId); }}
+                              onPointerDown={(e) => e.stopPropagation()}
+                              title={`Show BGP routes for ${av.vifId}`}
+                            >
+                              Routes
+                            </button>
                           )}
                         </div>
                       );
@@ -788,6 +1079,15 @@ export function CustomEdge({
         </EdgeLabelRenderer>
         );
       })()}
+      {showLiveStatus && openRoutePanelVifId && openRoutes && (
+        <VifRoutePanel
+          routes={openRoutes}
+          vifId={openRoutePanelVifId}
+          onClose={() => toggleVifRoutePanel(openRoutePanelVifId)}
+          anchorX={labelX}
+          anchorY={labelY}
+        />
+      )}
       {isDeletableEdge && !isLocked && !isSimulating && !isRecommended && !isHiddenEdge && (
         <EdgeLabelRenderer>
           <button

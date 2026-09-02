@@ -70,9 +70,9 @@ const steps: DriveStep[] = [
   {
     element: '[data-tour="maintenance"]',
     popover: {
-      title: 'Planned maintenance',
+      title: 'Direct Connect events',
       description:
-        'A calendar of upcoming AWS-scheduled maintenance events affecting your Direct Connect resources. The badge shows how many are open. Click a day to see affected connections, VIFs, and gateways, and jump straight to the next scheduled window. Only appears when events exist.',
+        'A calendar of AWS Health events affecting your Direct Connect resources: upcoming planned maintenance (amber) and AWS-side issues from the last 90 days (red), each labelled with its category. The badge counts what is live now. Click a day to see affected connections, VIFs, and gateways, and jump straight to the next scheduled window. Only appears when events exist.',
       side: 'bottom',
       align: 'end',
     },

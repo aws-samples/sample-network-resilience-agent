@@ -38,6 +38,7 @@ import type {
   VpcRouteTable,
   BgpPeer,
   DxMaintenanceEvent,
+  VifRoute,
 } from '../types/aws-resources';
 
 // CIDRs/IPs that are routing sentinels rather than customer addresses — must
@@ -103,6 +104,10 @@ export class Sanitizer {
   private awsDeviceMap = new Map<string, string>();
   private awsDeviceCounter = 0;
 
+  private opaqueIdMap = new Map<string, string>();
+  private opaqueIdAllocated = new Set<string>();
+  private opaqueIdCounter = 0;
+
   // ----- accessors / allocators -----
 
   resourceId(real: string | undefined): string {
@@ -119,6 +124,28 @@ export class Sanitizer {
     const pseudo = `${prefix}-${pad(next)}`;
     this.resourceMap.set(real, pseudo);
     this.resourceAllocated.add(pseudo);
+    return pseudo;
+  }
+
+  /**
+   * Rewrite an opaque AWS token that carries no `prefix-suffix` shape.
+   *
+   * `resourceId()` returns anything without a dash unchanged, by design — it
+   * needs a prefix to preserve. Failover test IDs (`ListVirtualInterfaceTestHistory`)
+   * are bare tokens like "0hm9q4ki", so routing them through `resourceId()`
+   * exported them verbatim. Pseudo values are prefixed "test" + a counter,
+   * which keeps them recognisable while colliding with nothing real.
+   */
+  opaqueId(real: string | undefined): string {
+    if (real == null) return real as unknown as string;
+    if (real === '') return real;
+    if (this.opaqueIdAllocated.has(real)) return real;
+    const cached = this.opaqueIdMap.get(real);
+    if (cached) return cached;
+    this.opaqueIdCounter += 1;
+    const pseudo = `test${pad(this.opaqueIdCounter)}`;
+    this.opaqueIdMap.set(real, pseudo);
+    this.opaqueIdAllocated.add(pseudo);
     return pseudo;
   }
 
@@ -184,6 +211,17 @@ export class Sanitizer {
     if (!pseudo) {
       const slash = real.lastIndexOf('/');
       const mask = slash >= 0 ? real.slice(slash + 1) : '24';
+      // IPv6 must be allocated in IPv6 space. The IPv4 path below would emit
+      // "203.0.113.0/56" for a real /56 — masked, but not a valid prefix, and
+      // anything downstream that parses it (cidr.ts, the route panels) then
+      // reads garbage. RFC 3849 documentation range, one /48 per prefix.
+      if (real.includes(':')) {
+        this.cidrCounter += 1;
+        pseudo = `2001:db8:${this.cidrCounter.toString(16)}::/${mask}`;
+        this.cidrMap.set(real, pseudo);
+        this.cidrAllocated.add(pseudo);
+        return pseudo;
+      }
       this.cidrCounter += 1;
       const idx = this.cidrCounter;
       // Allocate /24-aligned blocks inside TEST-NET-3, then TEST-NET-2,
@@ -379,6 +417,14 @@ export class Sanitizer {
       ownerAccount: v.ownerAccount ? this.accountId(v.ownerAccount) : v.ownerAccount,
       awsDeviceV2: this.awsDevice(v.awsDeviceV2),
       awsLogicalDeviceId: this.awsDevice(v.awsLogicalDeviceId),
+      // A public VIF's route filter prefixes are the customer's real routable,
+      // internet-facing blocks — as sensitive as anything in a snapshot. This
+      // field used to be set only by mock data (documentation-reserved CIDRs
+      // that SPECIAL_CIDRS passes through), so omitting it here was harmless
+      // until DescribeVirtualInterfaces started populating it from live
+      // accounts. Mask it like every sibling prefix list (allowedPrefixes,
+      // insideCidrBlocks, and vifRoute's own cidr).
+      routeFilterPrefixes: v.routeFilterPrefixes?.map((p) => ({ ...p, cidr: this.cidr(p.cidr) })),
     };
   }
 
@@ -614,6 +660,9 @@ export class Sanitizer {
   private vpcRoute(r: VpcRoute): VpcRoute {
     const out: VpcRoute = { ...r };
     if (r.destinationCidrBlock) out.destinationCidrBlock = this.cidr(r.destinationCidrBlock);
+    // Populated from DescribeRouteTables the same as the IPv4 field, so it is
+    // just as real and needs the same treatment.
+    if (r.destinationIpv6CidrBlock) out.destinationIpv6CidrBlock = this.cidr(r.destinationIpv6CidrBlock);
     if (r.destinationPrefixListId) out.destinationPrefixListId = this.resourceId(r.destinationPrefixListId);
     if (r.gatewayId && !SPECIAL_GATEWAY_IDS.has(r.gatewayId)) out.gatewayId = this.resourceId(r.gatewayId);
     if (r.natGatewayId) out.natGatewayId = this.resourceId(r.natGatewayId);
@@ -694,6 +743,35 @@ export class Sanitizer {
     const bgpPrefixMetrics = td.bgpPrefixMetrics
       ? new Map([...td.bgpPrefixMetrics.entries()].map(([k, v]) => [this.resourceId(k), v]))
       : undefined;
+    // Flap counts and timestamps carry no customer identifiers — only the VIF
+    // key needs rewriting.
+    const bgpStability = td.bgpStability
+      ? new Map([...td.bgpStability.entries()].map(([k, v]) => [this.resourceId(k), v]))
+      : undefined;
+    // Failover tests carry an ownerAccount (a real account ID) and resource IDs
+    // in testId / virtualInterfaceId / bgpPeers — all must be rewritten. testId
+    // needs opaqueId(), not resourceId(): AWS returns a bare dashless token, and
+    // resourceId() passes those through untouched.
+    const vifFailoverTests = td.vifFailoverTests
+      ? new Map([...td.vifFailoverTests.entries()].map(([k, v]) => [
+          this.resourceId(k),
+          v.map((t) => ({
+            ...t,
+            testId: this.opaqueId(t.testId),
+            virtualInterfaceId: this.resourceId(t.virtualInterfaceId),
+            bgpPeers: t.bgpPeers.map((p) => this.resourceId(p)),
+            ownerAccount: t.ownerAccount ? this.accountId(t.ownerAccount) : t.ownerAccount,
+          })),
+        ]))
+      : undefined;
+    // Routes are the most sensitive slice in a snapshot: real on-prem prefixes,
+    // real customer ASNs. Rewrite keys, CIDRs, AS paths, and community ASNs.
+    const vifRoutes = td.vifRoutes
+      ? new Map([...td.vifRoutes.entries()].map(([k, v]) => [this.resourceId(k), {
+          accepted: v.accepted.map((r) => this.vifRoute(r)),
+          advertised: v.advertised.map((r) => this.vifRoute(r)),
+        }]))
+      : undefined;
     const vifUtilization = td.vifUtilization
       ? new Map([...td.vifUtilization.entries()].map(([k, v]) => [this.resourceId(k), v]))
       : undefined;
@@ -726,12 +804,42 @@ export class Sanitizer {
       vpcRouteTables,
       cloudWanRoutes,
       bgpPrefixMetrics,
+      bgpStability,
+      vifFailoverTests,
+      vifRoutes,
       vifUtilization,
       connectionUtilization,
       utilizationWindowDays: td.utilizationWindowDays,
       maintenanceEvents: td.maintenanceEvents?.map((e) => this.maintenanceEvent(e)),
       homeAccountId: td.homeAccountId ? this.accountId(td.homeAccountId) : td.homeAccountId,
       regionNames,
+    };
+  }
+
+  // BGP community values are "asn:value" strings (e.g. "7224:8100"). Only the
+  // ASN half identifies a network, so the value half passes through — that's
+  // what carries the routing intent an SA needs to read (e.g. AWS's 7224:9100
+  // local-preference communities). A community that isn't in asn:value form is
+  // left alone rather than mangled.
+  private community(real: string): string {
+    const parts = real.split(':');
+    if (parts.length !== 2) return real;
+    const mapped = this.asnString(parts[0]);
+    return mapped == null ? real : `${mapped}:${parts[1]}`;
+  }
+
+  private vifRoute(r: VifRoute): VifRoute {
+    return {
+      ...r,
+      cidr: this.cidr(r.cidr),
+      asPath: r.asPath.map((seg) => ({
+        ...seg,
+        path: seg.path.map((a) => this.asn(a) ?? a),
+      })),
+      communities: r.communities.map((c) => this.community(c)),
+      // routeDirection / addressFamily / routeInstalledAt / awsLogicalDeviceId
+      // carry no customer identity — awsLogicalDeviceId is an AWS-side device
+      // name, handled the same way as elsewhere in this file (passed through).
     };
   }
 

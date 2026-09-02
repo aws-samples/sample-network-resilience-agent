@@ -83,7 +83,14 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
     const rTgwRouteTables = new Map<string, import('../types/aws-resources').TgwRouteTableWithRoutes[]>();
     await Promise.all(
       rTgws.map(async (tgw) => {
-        const routes = await logged(`${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(regionEc2, tgw.transitGatewayId), fetchErrors);
+        // includePropagations: true adds one Get* call per route table, but it
+        // runs in parallel with the SearchTransitGatewayRoutes call this loop
+        // already makes per table, so wall-clock is unchanged. Without it the
+        // route table cannot be distinguished from one where propagation was
+        // never enabled — the silent DX blackhole. A missing
+        // ec2:GetTransitGatewayRouteTablePropagations degrades that table's
+        // `propagations` to undefined rather than failing the fetch.
+        const routes = await logged(`${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(regionEc2, tgw.transitGatewayId, true), fetchErrors);
         if (routes.length > 0) rTgwRouteTables.set(tgw.transitGatewayId, routes);
       })
     );
@@ -390,6 +397,10 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
             const rTgwRoutes = new Map<string, import('../types/aws-resources').TgwRouteTableWithRoutes[]>();
             await Promise.all(
               rTgws.map(async (tgw) => {
+                // Propagations are deliberately NOT requested for spoke accounts:
+                // the assumed NetworkReadOnlyRole is out of our control and is
+                // unlikely to grant the newer Get* action, so this would add a
+                // guaranteed-noisy failure per route table for no signal.
                 const routes = await logged(`${accountId}/${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(spokeEc2, tgw.transitGatewayId), fetchErrors);
                 if (routes.length > 0) rTgwRoutes.set(tgw.transitGatewayId, routes);
               })

@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
+import { ISSUE_LOOKBACK_DAYS, NON_RESOURCE_ENTITY_VALUES } from '../api/health-dx';
 import type { DxMaintenanceEvent } from '../types/aws-resources';
 
 const MONTHS = [
@@ -30,6 +31,48 @@ function sameUtcDay(a: Date, b: Date): boolean {
     && a.getUTCDate() === b.getUTCDate();
 }
 
+/**
+ * Is this an AWS-side problem rather than planned maintenance?
+ *
+ * The Health API returns two categories for Direct Connect and this panel shows
+ * both: `scheduledChange` (planned maintenance, forward-looking and still
+ * actionable) and `issue` (an AWS-side fault, usually already closed by the time
+ * we fetch it). They must never be presented interchangeably — labelling a past
+ * outage "planned maintenance" tells the customer the opposite of what happened.
+ *
+ * A missing category means the snapshot predates issue fetching, when
+ * `scheduledChange` was all the app requested — so absent reads as scheduled.
+ */
+function isIssue(e: DxMaintenanceEvent): boolean {
+  return e.eventTypeCategory === 'issue';
+}
+
+/** An event AWS still considers live — upcoming maintenance, or an open fault. */
+function isCurrent(e: DxMaintenanceEvent): boolean {
+  return e.statusCode === 'upcoming' || e.statusCode === 'open';
+}
+
+/**
+ * Is this event about a region where the account has no Direct Connect at all?
+ *
+ * `PUBLIC` events are AWS-wide announcements pushed to every account in every
+ * region, whether or not that account has anything there — so a Frankfurt DX
+ * fault lands in the calendar of an estate that has never had a Frankfurt
+ * presence, painted as a red day it can do nothing about and was never affected
+ * by. Those are the only ones worth dropping, and the guards matter:
+ *
+ *  - `ACCOUNT_SPECIFIC` always stays. AWS is asserting *this* account was hit, so
+ *    an unrecognised region means our topology is stale or that region's fetch
+ *    failed — not that the event is irrelevant. Hiding it would suppress a real,
+ *    AWS-confirmed impact on the strength of data we know can be incomplete.
+ *  - Unknown/missing scope stays, since snapshots predating `eventScopeCode`
+ *    cannot be classified and a guess either way would be wrong for some of them.
+ *  - An event with no region stays; there is nothing to compare.
+ */
+function isOffFootprint(e: DxMaintenanceEvent, dxRegions: ReadonlySet<string>): boolean {
+  return e.eventScopeCode === 'PUBLIC' && !!e.region && !dxRegions.has(e.region);
+}
+
 /** Does event `e` intersect the UTC day of `day`? */
 function eventHitsDay(e: DxMaintenanceEvent, day: Date): boolean {
   if (!e.startTime) return false;
@@ -46,7 +89,12 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
   // `?? []` here returns a new array each render and triggers Zustand's infinite
   // re-render guard.
   const rawEvents = useTopologyStore((s) => s.topologyData?.maintenanceEvents);
-  const events: DxMaintenanceEvent[] = rawEvents ?? EMPTY_EVENTS;
+  const allEvents: DxMaintenanceEvent[] = rawEvents ?? EMPTY_EVENTS;
+  // Same rule as rawEvents: select the underlying array references, never a
+  // derived array, or every render hands Zustand a new object.
+  const connections = useTopologyStore((s) => s.topologyData?.connections);
+  const virtualInterfaces = useTopologyStore((s) => s.topologyData?.virtualInterfaces);
+  const lags = useTopologyStore((s) => s.topologyData?.lags);
   const currentNodes = useTopologyStore((s) => s.currentNodes);
   const currentEdges = useTopologyStore((s) => s.currentEdges);
   const setSpotlightNode = useTopologyStore((s) => s.setSpotlightNode);
@@ -54,6 +102,52 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
   const light = useIsLight();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Regions where this account actually terminates Direct Connect. Connections,
+  // VIFs and LAGs each carry their own region and none of the three is a superset
+  // of the others — a hosted-VIF account owns no connections at all, and a LAG
+  // can sit in a region whose VIFs failed to fetch.
+  const dxRegions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of connections ?? []) if (c.region) set.add(c.region);
+    for (const v of virtualInterfaces ?? []) if (v.region) set.add(v.region);
+    for (const l of lags ?? []) if (l.region) set.add(l.region);
+    return set;
+  }, [connections, virtualInterfaces, lags]);
+
+  // Everything downstream — badge counts, day dots, next-activity jump, the
+  // details panel — reads `events`, so the filter applies once here rather than
+  // at each call site where one omission would put a dropped event back on screen.
+  //
+  // Split rather than filtered so what was dropped can still be reported. When we
+  // know of no DX regions at all — topology not loaded yet, or every regional fetch
+  // failed — filter nothing: an empty footprint is ignorance, not evidence, and
+  // treating it as evidence would blank the calendar off one failed call.
+  const { events, offFootprint } = useMemo(() => {
+    if (dxRegions.size === 0) {
+      return { events: allEvents, offFootprint: EMPTY_EVENTS };
+    }
+    const kept: DxMaintenanceEvent[] = [];
+    const dropped: DxMaintenanceEvent[] = [];
+    for (const e of allEvents) {
+      (isOffFootprint(e, dxRegions) ? dropped : kept).push(e);
+    }
+    return { events: kept, offFootprint: dropped };
+  }, [allEvents, dxRegions]);
+
+  // Dropped events get no UI at all — not a card, not a badge, not a footnote:
+  // an event in a region the account has nothing in is not a finding, and a
+  // control for reviewing non-findings is just clutter. But "no UI" must not mean
+  // unaccountable, or a wrong footprint call becomes undiagnosable, so the console
+  // keeps the record: it names the regions and is the first place to look when an
+  // event you expected is absent.
+  useEffect(() => {
+    if (offFootprint.length === 0) return;
+    const regions = Array.from(new Set(offFootprint.map((e) => e.region).filter(Boolean))).sort();
+    console.log(
+      `[Calendar] Hiding ${offFootprint.length} region-wide AWS event(s) — no Direct Connect resources in ${regions.join(', ')}`,
+    );
+  }, [offFootprint]);
 
   // Resolve a raw AWS resource ID (dxcon-*, dxvif-*, dxgw-*) to either a graph
   // node ID or an edge ID so hovering the chip can spotlight the matching
@@ -138,7 +232,10 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // Hide entirely when there are no events — per user spec.
+  // Hide entirely when there are no events — per user spec. Keyed on the filtered
+  // list, so an account whose only events are region-wide faults in regions it has
+  // no presence in gets no calendar at all rather than an empty one inviting a
+  // click. The console line above still records what was dropped.
   if (events.length === 0) return null;
 
   const firstDay = startOfMonthUtc(viewYear, viewMonth);
@@ -171,9 +268,14 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
   // Find the next event start at/after the given instant. Used to jump
   // forward from today, or from the currently selected day, to the next
   // scheduled maintenance window.
+  //
+  // Scheduled changes only: `issue` events are AWS-side faults we fetch
+  // retrospectively, so a forward "next activity" jump would either never reach
+  // them or, worse, land on one and describe a past outage as upcoming work.
   const nextEventAfter = (from: Date): Date | null => {
     const threshold = from.getTime();
     const upcoming = events
+      .filter((e) => !isIssue(e))
       .map((e) => (e.startTime ? new Date(e.startTime) : null))
       .filter((d): d is Date => !!d && d.getTime() >= threshold)
       .sort((a, b) => a.getTime() - b.getTime());
@@ -207,7 +309,25 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
 
   const viewIsCurrentMonth = viewYear === today.getUTCFullYear() && viewMonth === today.getUTCMonth();
 
-  const upcomingCount = events.filter((e) => e.statusCode === 'upcoming' || e.statusCode === 'open').length;
+  // Counted separately: an open AWS fault and an upcoming maintenance window are
+  // different things to act on, and the badge used to pool them under the
+  // "Planned maintenance" label.
+  const upcomingCount = events.filter((e) => !isIssue(e) && isCurrent(e)).length;
+  const openIssueCount = events.filter((e) => isIssue(e) && isCurrent(e)).length;
+  const pastIssueCount = events.filter((e) => isIssue(e) && !isCurrent(e)).length;
+  const badgeCount = upcomingCount + openIssueCount;
+
+  // The panel carries both categories, so the trigger has to describe whichever
+  // it actually holds instead of always claiming planned maintenance.
+  const triggerLabel = (() => {
+    const parts: string[] = [];
+    if (upcomingCount > 0) parts.push(`${upcomingCount} planned maintenance`);
+    if (openIssueCount > 0) parts.push(`${openIssueCount} ongoing AWS issue${openIssueCount === 1 ? '' : 's'}`);
+    if (pastIssueCount > 0) parts.push(`${pastIssueCount} past AWS issue${pastIssueCount === 1 ? '' : 's'}`);
+    return parts.length > 0
+      ? `Direct Connect events — ${parts.join(', ')}`
+      : 'Direct Connect events';
+  })();
 
   const daysUntilNext = nextEvent
     ? Math.max(0, Math.round(
@@ -222,8 +342,8 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
         data-tour="maintenance"
         onClick={() => setOpen((v) => !v)}
         className={iconBtnClass(open)}
-        title={`Planned maintenance (${upcomingCount})`}
-        aria-label="Planned maintenance calendar"
+        title={triggerLabel}
+        aria-label="Direct Connect events calendar"
         aria-expanded={open}
       >
         <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -232,14 +352,17 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
           <line x1="8" y1="2" x2="8" y2="6" />
           <line x1="3" y1="10" x2="21" y2="10" />
         </svg>
-        {upcomingCount > 0 && (
+        {badgeCount > 0 && (
           <span
             className={`absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full text-[9px] font-semibold leading-[14px] text-center ${
-              light ? 'bg-amber-500 text-white' : 'bg-amber-500 text-slate-900'
+              // An ongoing AWS fault outranks planned work: red, not amber.
+              openIssueCount > 0
+                ? 'bg-red-500 text-white'
+                : light ? 'bg-amber-500 text-white' : 'bg-amber-500 text-slate-900'
             }`}
             aria-hidden="true"
           >
-            {upcomingCount}
+            {badgeCount}
           </span>
         )}
       </button>
@@ -346,7 +469,19 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
               {cells.map((day, i) => {
                 if (!day) return <div key={`blank-${i}`} className="h-8" />;
                 const isToday = sameUtcDay(day, today);
-                const hit = events.some((e) => eventHitsDay(e, day));
+                const dayEvents = events.filter((e) => eventHitsDay(e, day));
+                const hit = dayEvents.length > 0;
+                // A day carrying an AWS fault is styled and described as one even
+                // if maintenance also falls on it — the fault is the bigger news.
+                const dayHasIssue = dayEvents.some(isIssue);
+                const dayHasScheduled = dayEvents.some((e) => !isIssue(e));
+                const dayLabel = dayHasIssue && dayHasScheduled
+                  ? ' — AWS issue and planned maintenance'
+                  : dayHasIssue
+                    ? ' — AWS issue'
+                    : dayHasScheduled
+                      ? ' — planned maintenance'
+                      : '';
                 const isSelected = selectedDay && sameUtcDay(day, selectedDay);
                 const todayRing = isToday && !isSelected
                   ? light
@@ -360,7 +495,11 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
                     className={`relative h-8 rounded text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${todayRing} ${
                       isSelected
                         ? 'bg-blue-500 text-white'
-                        : hit
+                        : dayHasIssue
+                          ? light
+                            ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                            : 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
+                          : hit
                           ? light
                             ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
                             : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
@@ -372,13 +511,17 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
                               ? 'text-gray-700 hover:bg-gray-50'
                               : 'text-slate-300 hover:bg-white/[0.04]'
                     }`}
-                    aria-label={`${day.toUTCString()}${isToday ? ' — today' : ''}${hit ? ' — maintenance scheduled' : ''}`}
+                    aria-label={`${day.toUTCString()}${isToday ? ' — today' : ''}${dayLabel}`}
                     aria-pressed={!!isSelected}
                   >
                     {day.getUTCDate()}
                     {hit && !isSelected && (
                       <span
-                        className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full ${light ? 'bg-amber-500' : 'bg-amber-400'}`}
+                        className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full ${
+                          dayHasIssue
+                            ? light ? 'bg-red-500' : 'bg-red-400'
+                            : light ? 'bg-amber-500' : 'bg-amber-400'
+                        }`}
                         aria-hidden="true"
                       />
                     )}
@@ -405,11 +548,23 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
               </div>
             ) : selectedDay ? (
               <div className={`px-3 py-3 text-[11px] ${light ? 'text-gray-500' : 'text-slate-500'}`}>
-                No maintenance scheduled on {selectedDay.toUTCString().slice(0, 16)} UTC.
+                No Direct Connect events on {selectedDay.toUTCString().slice(0, 16)} UTC.
               </div>
             ) : (
-              <div className={`px-3 py-3 text-[11px] ${light ? 'text-gray-500' : 'text-slate-500'}`}>
-                Select a highlighted date to see details.
+              <div className={`px-3 py-3 text-[11px] space-y-2 ${light ? 'text-gray-500' : 'text-slate-500'}`}>
+                <div>Select a highlighted date to see details.</div>
+                {/* Two colours now carry meaning, so name them rather than
+                    leaving the user to infer why some days are red. */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+                  <span className="inline-flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${light ? 'bg-amber-500' : 'bg-amber-400'}`} aria-hidden="true" />
+                    Planned maintenance
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${light ? 'bg-red-500' : 'bg-red-400'}`} aria-hidden="true" />
+                    AWS issue (last {ISSUE_LOOKBACK_DAYS} days)
+                  </span>
+                </div>
               </div>
             )}
           </div>
@@ -420,11 +575,16 @@ export function MaintenanceCalendar({ iconBtnClass }: { iconBtnClass: (active?: 
 }
 
 /**
- * Events sharing the same maintenance window — identical start, end, and
- * affected resource set. AWS emits multiple PHD reminders for a single
- * maintenance (e.g. T-14 / T-7 / T-1); we render one card per window and
- * expose every source notification in a disclosure so the auditor can still
- * trace each original PHD entry.
+ * Events sharing the same window — identical category, start, end, and affected
+ * resource set. AWS emits multiple PHD reminders for a single maintenance (e.g.
+ * T-14 / T-7 / T-1); we render one card per window and expose every source
+ * notification in a disclosure so the auditor can still trace each original PHD
+ * entry.
+ *
+ * Category is part of the fingerprint: an `issue` and a `scheduledChange` over
+ * the same window on the same resources are genuinely different events, and
+ * merging them would file the outage under whichever card won the sort and
+ * label it with that one's category.
  */
 type MaintenanceGroup = {
   canonical: DxMaintenanceEvent;
@@ -442,7 +602,7 @@ function groupEventsByWindow(events: DxMaintenanceEvent[]): MaintenanceGroup[] {
       ungrouped.push(e);
       continue;
     }
-    const key = `${e.startTime}|${e.endTime}|${[...e.affectedResourceIds].sort().join(',')}`;
+    const key = `${isIssue(e) ? 'issue' : 'scheduled'}|${e.startTime}|${e.endTime}|${[...e.affectedResourceIds].sort().join(',')}`;
     const list = byKey.get(key) ?? [];
     list.push(e);
     byKey.set(key, list);
@@ -524,12 +684,55 @@ function MaintenanceDetail({
   // tab do), so scanning the body alone leaves the user unable to tell which
   // connections/VIFs the maintenance hits. Surface affectedResourceIds — which
   // we already have from DescribeAffectedEntities — as their own chip section.
-  const affectedIds = Array.from(new Set(e.affectedResourceIds ?? []));
+  // Sentinels are filtered at the fetch layer now, but snapshots captured before
+  // that still carry them, so screen here too — the chip is where the damage
+  // showed and this is the last point before it renders.
+  const affectedIds = Array.from(new Set(e.affectedResourceIds ?? [])).filter(
+    (id) => !NON_RESOURCE_ENTITY_VALUES.has(id),
+  );
+
+  // With no IDs left, say why — but only when AWS's scope actually tells us why.
+  // Rendering the sentinel as a chip read as "we failed to identify this" when the
+  // truth is "AWS never scoped it to a resource", and those imply different next
+  // steps for the customer. Where scope is unknown (snapshots predating the field)
+  // we stay silent rather than guess, which is also the pre-existing behaviour for
+  // an event that simply returned no entities.
+  const noResourceReason = affectedIds.length > 0
+    ? null
+    : e.eventScopeCode === 'PUBLIC'
+      ? `AWS reported this as a region-wide event in ${e.region || 'the affected region'} and does not attribute region-wide events to individual resources.`
+      : e.eventScopeCode === 'ACCOUNT_SPECIFIC'
+        ? 'AWS attributed this to the account without naming a connection or virtual interface.'
+        : null;
 
   const extraCount = group.sources.length - 1;
 
+  // Every card used to look like planned maintenance. A category chip is the one
+  // place the distinction is unambiguous, since AWS's own description text does
+  // not reliably announce which kind of event it is.
+  const issue = isIssue(e);
+  const resolved = issue && !isCurrent(e);
+  const chipLabel = issue
+    ? resolved ? 'AWS issue · resolved' : 'AWS issue · ongoing'
+    : 'Planned maintenance';
+  const chipClass = issue
+    ? resolved
+      ? light ? 'bg-gray-100 border-gray-300 text-gray-600' : 'bg-slate-700/40 border-slate-600/50 text-slate-300'
+      : light ? 'bg-red-50 border-red-200 text-red-700' : 'bg-red-500/10 border-red-500/30 text-red-300'
+    : light ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-amber-500/10 border-amber-500/30 text-amber-300';
+
   return (
     <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <span className={`inline-block px-1.5 py-[1px] rounded border text-[9px] font-semibold uppercase tracking-wide ${chipClass}`}>
+          {chipLabel}
+        </span>
+        {issue && (
+          <span className={`text-[10px] ${light ? 'text-gray-500' : 'text-slate-500'}`}>
+            {resolved ? 'AWS reports this as closed' : 'reported by AWS as still open'}
+          </span>
+        )}
+      </div>
       {header && (
         <div className={`text-[12px] font-semibold leading-snug ${light ? 'text-gray-800' : 'text-slate-100'}`}>
           {header}
@@ -542,23 +745,29 @@ function MaintenanceDetail({
       >
         {renderBodyWithResourceChips(body, resolveSpotlight, setSpotlightNode, setSpotlightEdge, light)}
       </div>
-      {affectedIds.length > 0 && (
+      {(affectedIds.length > 0 || noResourceReason) && (
         <div className="space-y-1 pt-2">
           <div className={`text-[11px] font-semibold ${light ? 'text-gray-800' : 'text-slate-100'}`}>
             Affected resources
           </div>
-          <div className="flex flex-wrap gap-1">
-            {affectedIds.map((id) => (
-              <ResourceChip
-                key={id}
-                resourceId={id}
-                target={resolveSpotlight(id)}
-                light={light}
-                setSpotlightNode={setSpotlightNode}
-                setSpotlightEdge={setSpotlightEdge}
-              />
-            ))}
-          </div>
+          {affectedIds.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {affectedIds.map((id) => (
+                <ResourceChip
+                  key={id}
+                  resourceId={id}
+                  target={resolveSpotlight(id)}
+                  light={light}
+                  setSpotlightNode={setSpotlightNode}
+                  setSpotlightEdge={setSpotlightEdge}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className={`text-[10.5px] leading-relaxed ${light ? 'text-gray-600' : 'text-slate-400'}`}>
+              {noResourceReason}
+            </div>
+          )}
         </div>
       )}
       {extraCount > 0 && (

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { ViewToggle } from './ViewToggle';
 import { CredentialsModal } from './CredentialsModal';
 import { FullExportConfirmModal } from './FullExportConfirmModal';
@@ -30,14 +30,16 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
   const utilizationLoading = useTopologyStore((s) => s.utilizationLoading);
   const utilizationError = useTopologyStore((s) => s.utilizationError);
   const loadUtilization = useTopologyStore((s) => s.loadUtilization);
+  const showBgpHistory = useTopologyStore((s) => s.showBgpHistory);
+  const setShowBgpHistory = useTopologyStore((s) => s.setShowBgpHistory);
+  const loadBgpStability = useTopologyStore((s) => s.loadBgpStability);
+  const loadVifFailoverTests = useTopologyStore((s) => s.loadVifFailoverTests);
+  const bgpHistoryLoading = useTopologyStore((s) => s.bgpStabilityLoading || s.vifFailoverTestsLoading);
+  const bgpHistoryError = useTopologyStore((s) => s.bgpStabilityError ?? s.vifFailoverTestsError);
   const viewMode = useTopologyStore((s) => s.viewMode);
   const setViewMode = useTopologyStore((s) => s.setViewMode);
   const isSimulating = useTopologyStore((s) => s.isSimulating);
   const setIsSimulating = useTopologyStore((s) => s.setIsSimulating);
-  const failedNodeIds = useTopologyStore((s) => s.failedNodeIds);
-  const failedEdgeIds = useTopologyStore((s) => s.failedEdgeIds);
-  const clearFailures = useTopologyStore((s) => s.clearFailures);
-  const currentEdges = useTopologyStore((s) => s.currentEdges);
   const credentials = useTopologyStore((s) => s.credentials);
   const setCredentials = useTopologyStore((s) => s.setCredentials);
   const resetTopology = useTopologyStore((s) => s.resetTopology);
@@ -164,22 +166,7 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
     { value: 'crossAccount', label: 'Cross-Account' },
   ] as const;
 
-  const hasFailures = failedNodeIds.size > 0 || failedEdgeIds.size > 0;
   const isConnected = !!credentials && !useMock;
-
-  const impactSummary = useMemo(() => {
-    if (!isSimulating || !hasFailures) return null;
-    const totalEdges = currentEdges.filter((e) => !e.data?.isRecommended).length;
-    let downEdges = 0;
-    for (const e of currentEdges) {
-      if (e.data?.isRecommended) continue;
-      if (failedEdgeIds.has(e.id) || failedNodeIds.has(e.source) || failedNodeIds.has(e.target)) {
-        downEdges++;
-      }
-    }
-    const upEdges = totalEdges - downEdges;
-    return { totalEdges, downEdges, upEdges, failedNodes: failedNodeIds.size, failedLinks: failedEdgeIds.size };
-  }, [isSimulating, hasFailures, failedNodeIds, failedEdgeIds, currentEdges]);
 
   const iconBtn = (active = false) =>
     `flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 ${
@@ -291,6 +278,44 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
               </svg>
               {importedSnapshot ? 'Snapshot' : 'Live'}
             </button>
+            {/* BGP History is a sub-mode of Live: it answers a whole-topology
+                question, so one fetch annotates every VIF edge rather than
+                making the user click each edge in turn. */}
+            {showLiveStatus && (
+              <button
+                onClick={() => {
+                  const next = !showBgpHistory;
+                  setShowBgpHistory(next);
+                  // Both calls are individually cache-guarded, so re-toggling is free.
+                  if (next) { void loadBgpStability(); void loadVifFailoverTests(); }
+                }}
+                disabled={bgpHistoryLoading}
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md transition-all duration-150 disabled:cursor-wait ${
+                  showBgpHistory
+                    ? (light ? 'bg-emerald-100 text-emerald-700 shadow-sm' : 'bg-emerald-500/15 text-emerald-300')
+                    : light ? 'text-gray-600 hover:text-gray-800 hover:bg-white' : 'text-slate-300 hover:text-slate-100 hover:bg-white/5'
+                }`}
+                title={
+                  bgpHistoryError
+                    ? `BGP history error: ${bgpHistoryError}`
+                    : showBgpHistory
+                      ? 'Hide BGP session history'
+                      : 'Show BGP session flap history (CloudWatch) and recorded failover tests'
+                }
+                aria-pressed={showBgpHistory}
+              >
+                {bgpHistoryLoading ? (
+                  <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                ) : (
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 8v4l3 3" /><circle cx="12" cy="12" r="9" />
+                  </svg>
+                )}
+                BGP History
+              </button>
+            )}
             <button
               onClick={() => {
                 const next = !showUtilization;
@@ -726,9 +751,7 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
 
       {/* Live status disclaimer */}
       {showLiveStatus && !dismissedStatusDisclaimer && (
-        <div className={`flex items-center justify-center gap-2.5 px-4 py-2 text-[11px] leading-relaxed ${
-          isSimulating ? '' : 'border-b'
-        } ${
+        <div className={`flex items-center justify-center gap-2.5 px-4 py-2 text-[11px] leading-relaxed border-b ${
           light ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-amber-900/15 border-amber-800/20 text-amber-300/90'
         }`}>
           <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -760,43 +783,6 @@ export function TopBar({ onRefresh, onToggleChat, chatOpen, onStartTour }: { onR
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
-        </div>
-      )}
-
-      {/* Simulation status bar */}
-      {isSimulating && (
-        <div className={`flex items-center justify-center gap-2.5 px-4 py-2 text-[11px] leading-relaxed border-b ${
-          impactSummary
-            ? 'bg-red-950/60 border-red-800/40 text-red-200'
-            : light ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-amber-900/15 border-amber-800/20 text-amber-300/90'
-        }`}>
-          <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-          </svg>
-          {impactSummary ? (
-            <span>
-              <strong>{impactSummary.failedNodes} node{impactSummary.failedNodes !== 1 ? 's' : ''}</strong>
-              {impactSummary.failedLinks > 0 && <>, <strong>{impactSummary.failedLinks} link{impactSummary.failedLinks !== 1 ? 's' : ''}</strong></>}
-              {' '}failed — <strong>{impactSummary.downEdges}</strong> of {impactSummary.totalEdges} paths down, <strong className="text-green-400">{impactSummary.upEdges} surviving</strong>
-            </span>
-          ) : (
-            <span>Click on zones, nodes, or edges to simulate failures</span>
-          )}
-          {hasFailures && (
-            <button
-              onClick={clearFailures}
-              className={`ml-1 px-2 py-0.5 text-[10px] font-semibold rounded-md transition-colors ${
-                impactSummary
-                  ? 'text-red-200 hover:text-white hover:bg-red-500/20 border border-red-400/30'
-                  : light
-                    ? 'text-amber-700 hover:bg-amber-100 border border-amber-300'
-                    : 'text-amber-200 hover:bg-amber-500/20 border border-amber-400/30'
-              }`}
-              title="Clear all failures"
-            >
-              Reset
-            </button>
-          )}
         </div>
       )}
 

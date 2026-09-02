@@ -2,7 +2,7 @@ import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData, VpcChildInfo } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
-import { VPC_TABLE_MAX_BODY_HEIGHT, VPC_TABLE_WIDTH } from '../../utils/constants';
+import { VPC_TABLE_MAX_BODY_HEIGHT, VPC_TABLE_WIDTH, dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { VpcIcon } from './aws-icons';
 
@@ -27,7 +27,7 @@ export function VpcGroupNode({ data, id }: NodeProps) {
   const isTable = vpcGroupViewMode.has(groupKey);
   const vpcChildren = (d.vpcChildren as VpcChildInfo[] | undefined) ?? [];
   const baseShadow = theme === 'light' ? COLORS.light.nodeShadow : '0 1px 3px rgba(0,0,0,0.3)';
-  const dimOpacity = isDimmed ? 0.25 : undefined;
+  const dimOpacity = isDimmed ? dimOpacityFor('node', theme === 'light') : undefined;
 
   if (isTable) {
     return (

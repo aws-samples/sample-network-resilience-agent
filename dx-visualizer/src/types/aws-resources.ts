@@ -16,6 +16,7 @@ export interface DxConnection {
   // visualizer renders these with an amber accent so it's clear the physical
   // path was reconstructed rather than observed via DescribeConnections.
   isInferred?: boolean;
+  rateLimiterStatus?: RateLimiterStatus;
 }
 
 export interface BgpPeer {
@@ -46,6 +47,100 @@ export interface DxVirtualInterface {
   ownerAccount?: string;
   awsDeviceV2?: string;
   awsLogicalDeviceId?: string;
+  // Bandwidth allocation applied to this VIF (e.g. "50Mbps", "1.6Tbps"). When
+  // set, it — not the parent connection's bandwidth — is the ceiling this VIF's
+  // traffic can reach, so it's the correct denominator for utilization. AWS
+  // guarantees it cannot exceed the parent connection or LAG bandwidth.
+  rateLimit?: string;
+}
+
+// Rate-limiter quota on a connection or LAG: AWS allows a finite number of
+// per-VIF rate limiters per port.
+export interface RateLimiterStatus {
+  maxAllowed?: number;
+  inUse?: number;
+  remaining?: number;
+  /** Total bandwidth allocated across all rate limiters on the connection. */
+  totalBandwidth?: string;
+}
+
+// One AS_PATH segment of a BGP route. `pathType` is 'seq' (ordered AS_SEQUENCE)
+// or 'set' (unordered AS_SET) per the DX API.
+export interface VifRouteAsPathSegment {
+  pathType?: 'seq' | 'set';
+  path: number[];
+}
+
+// A single BGP route on a virtual interface, from ListVirtualInterfaceRoutes
+// (AWS Direct Connect BGP route visibility, launched 2026-07-30).
+export interface VifRoute {
+  cidr: string;
+  addressFamily?: 'ipv4' | 'ipv6';
+  asPath: VifRouteAsPathSegment[];
+  // BGP community values as "asn:value" strings (e.g. "7224:8100").
+  communities: string[];
+  routeDirection: 'accepted' | 'advertised';
+  // ISO-8601 string, not the SDK's Date — snapshots are JSON, and the rest of
+  // this file already normalizes AWS timestamps this way (see DxMaintenanceEvent).
+  routeInstalledAt?: string;
+  awsLogicalDeviceId?: string;
+}
+
+// Routes for one VIF, split by direction. `accepted` are routes AWS received
+// from the customer router; `advertised` are routes AWS sends to it.
+export interface VifRoutes {
+  accepted: VifRoute[];
+  advertised: VifRoute[];
+}
+
+// One recorded BGP failover test on a VIF, from ListVirtualInterfaceTestHistory.
+// This is the only AWS-side evidence that a customer's redundancy was ever
+// actually exercised, rather than merely configured.
+export interface VifFailoverTest {
+  testId: string;
+  virtualInterfaceId: string;
+  /** BGP peer IDs that were taken down for the test. */
+  bgpPeers: string[];
+  /** AWS returns a free-form string, e.g. 'running' | 'completed' | 'cancelled'. */
+  status: string;
+  /** Account that ran the test — an account ID, so it must be sanitized. */
+  ownerAccount?: string;
+  testDurationInMinutes?: number;
+  /** ISO-8601; snapshots are JSON, so the SDK's Date is normalized. */
+  startTime?: string;
+  endTime?: string;
+}
+
+// CloudWatch AWS/DX BGP prefix counts for one VIF.
+export interface BgpPrefixMetrics {
+  /** IPv4 + IPv6 combined. Display only — see byFamily for limit checks. */
+  accepted?: number;
+  advertised?: number;
+  /**
+   * Per-address-family counts, from the documented `IpAddressFamily` dimension.
+   * The quota is "100 each for IPv4 and IPv6", so a limit check must read this
+   * rather than the pooled totals above. Absent when the dimension was not
+   * reported, or in snapshots written before the split existed.
+   */
+  byFamily?: Partial<Record<'ipv4' | 'ipv6', { accepted?: number; advertised?: number }>>;
+}
+
+// BGP session stability for one VIF, derived from the AWS/DX
+// VirtualInterfaceBgpStatus metric (1 = up, 0 = down). DescribeVirtualInterfaces
+// only reports the state right now, so without this a VIF that flapped 11 times
+// last week is indistinguishable from one solid for a year.
+export interface BgpSessionStability {
+  /** up→down transitions in the window. 0 = never dropped. */
+  flapCount: number;
+  /** Sampled periods where the session was down for at least part of the interval. */
+  downPeriods: number;
+  /** Periods sampled — the denominator for "down 3 of 2016 intervals". */
+  totalPeriods: number;
+  /** ISO-8601 timestamp of the most recent observed drop. */
+  lastFlapAt?: string;
+  /** Days actually sampled. CloudWatch retention caps this: 63d at 5-min resolution. */
+  windowDays: number;
+  byFamily?: Partial<Record<'ipv4' | 'ipv6', { flapCount: number; downPeriods: number }>>;
 }
 
 export interface DxGateway {
@@ -87,6 +182,14 @@ export interface DxLocation {
   locationName: string;
   region: string;
   availablePortSpeeds: string[];
+  /**
+   * Partners (providers) who can deliver a circuit at this facility. Lets the
+   * partner-diversity rule name the customer's real alternatives instead of
+   * advising "use a second provider" in the abstract.
+   */
+  availableProviders?: string[];
+  /** Port speeds at this location that support MACsec. */
+  availableMacSecPortSpeeds?: string[];
 }
 
 export interface DxLag {
@@ -99,6 +202,7 @@ export interface DxLag {
   region: string;
   lagState: string;
   connections: DxConnection[];
+  rateLimiterStatus?: RateLimiterStatus;
 }
 
 export interface Vpc {
@@ -183,6 +287,13 @@ export interface VpnTunnel {
   // Customer-gateway-side DPD config is not exposed by any AWS API.
   dpdTimeoutSeconds?: number;
   dpdTimeoutAction?: string;
+  /**
+   * When this tunnel last changed state, as ISO-8601 (the SDK returns a Date;
+   * normalized here because snapshots are JSON). Turns "tunnel is DOWN" into
+   * "DOWN for 6 days" — a tunnel down for months is a different finding from
+   * one that just dropped.
+   */
+  lastStatusChange?: string;
 }
 
 export interface VpnConnection {
@@ -195,6 +306,12 @@ export interface VpnConnection {
   category: string;
   customerGatewayAddress: string;
   tunnels: VpnTunnel[];
+  /**
+   * True when the VPN uses static routes instead of BGP. A static-routes-only
+   * VPN cannot re-route dynamically, so it is a weak DX backup — AWS recommends
+   * BGP Site-to-Site VPN for TGW attachments.
+   */
+  staticRoutesOnly?: boolean;
   tags: Record<string, string>;
 }
 
@@ -317,9 +434,25 @@ export interface TgwRoute {
   state: 'active' | 'blackhole';
 }
 
+// One attachment propagating routes into a TGW route table.
+export interface TgwRouteTablePropagation {
+  transitGatewayAttachmentId: string;
+  resourceId: string;
+  /** e.g. 'vpc', 'vpn', 'direct-connect-gateway', 'peering'. */
+  resourceType: string;
+  /** 'enabled' | 'enabling' | 'disabled' | 'disabling'. */
+  state: string;
+}
+
 export interface TgwRouteTableWithRoutes {
   routeTable: TgwRouteTable;
   routes: TgwRoute[];
+  /**
+   * Attachments propagating into this table. `undefined` means "not fetched or
+   * permission denied" — distinct from `[]`, which means AWS confirmed nothing
+   * propagates here. Rules must not treat unknown as absent.
+   */
+  propagations?: TgwRouteTablePropagation[];
 }
 
 export interface DxMaintenanceEvent {
@@ -333,6 +466,29 @@ export interface DxMaintenanceEvent {
   affectedResourceIds: string[];
   description: string;
   accountId?: string;
+  /**
+   * Health event category: 'scheduledChange' (planned maintenance) or 'issue'
+   * (an actual AWS-side DX problem). Absent in snapshots written before issue
+   * events were fetched — treat missing as 'scheduledChange', which is all the
+   * app used to request.
+   */
+  eventTypeCategory?: 'scheduledChange' | 'issue';
+  /**
+   * Health event scope, verbatim from DescribeEvents.
+   *
+   *  - `PUBLIC` — a region-wide AWS announcement, broadcast to every account
+   *    regardless of whether that account owns anything in the region. AWS does
+   *    not map these to individual resources, so DescribeAffectedEntities answers
+   *    with the sentinel `"UNKNOWN"` rather than a connection or VIF.
+   *  - `ACCOUNT_SPECIFIC` — AWS asserts *this* account was affected. Scheduled
+   *    maintenance names the exact `dxcon-*`/`dxvif-*`; an account-level issue
+   *    answers with the sentinel `"AWS_ACCOUNT"` and names nothing.
+   *
+   * Absent in snapshots written before the field was captured. Treat missing as
+   * unknown — never as `PUBLIC`, or the off-footprint filter would hide events
+   * from older snapshots it cannot actually classify.
+   */
+  eventScopeCode?: 'PUBLIC' | 'ACCOUNT_SPECIFIC' | 'NONE';
 }
 
 export interface AwsCredentials {

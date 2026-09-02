@@ -19,6 +19,13 @@ export function DxPartnerDeviceNode({ id, data }: NodeProps) {
       accent={d.isInferred ? 'inferred' : 'default'}
       bgColor="#1e1033"
       badges={d.badges}
+      // Customer-link anchors, same as the on-prem routers. These cards share one
+      // column, so a link between two of them drops vertically rather than
+      // looping right→left around both. Both render after BaseNode's default
+      // left/right pair, so the unnamed DX Connection edge to the AWS device
+      // still resolves to the right-hand handle.
+      extraTopHandles={[{ id: 'top', type: 'target' }]}
+      extraBottomHandles={[{ id: 'bottom', type: 'source' }]}
     >
       {showLiveStatus && <LiveStatusDot state={state} />}
     </BaseNode>

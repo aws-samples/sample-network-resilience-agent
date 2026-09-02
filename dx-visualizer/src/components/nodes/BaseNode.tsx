@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeBadge } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
+import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { useRedact } from '../../utils/redact';
 
@@ -29,6 +30,14 @@ interface BaseNodeProps {
   // that require a named source handle on the left.
   extraLeftHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
   extraRightHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
+  // Named handles on the card's top/bottom edge, for edges that route vertically
+  // between two nodes in the SAME column. Rendered last, so ReactFlow still
+  // resolves an edge that names no handle to the default left/right pair —
+  // otherwise a vertical handle would capture unqualified edges and send them
+  // out of the top of the card. Anchored to the card rather than the node box so
+  // the dot sits on the visible border, not on the layout padding around it.
+  extraTopHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
+  extraBottomHandles?: { id: string; type: 'source' | 'target'; background?: string }[];
   children?: React.ReactNode;
   nodeId?: string;
   // Rendered absolutely-positioned at the visible node's top-right corner.
@@ -48,6 +57,8 @@ export const BaseNode = memo(function BaseNode({
   targetHandleIds,
   extraLeftHandles,
   extraRightHandles,
+  extraTopHandles,
+  extraBottomHandles,
   children,
   nodeId,
   topRightOverlay,
@@ -66,6 +77,20 @@ export const BaseNode = memo(function BaseNode({
   );
   const isSpotlit = useTopologyStore((s) => nodeId != null && s.spotlightNodeIds.has(nodeId));
   const isPinned = useTopologyStore((s) => nodeId != null && s.pinnedNodeId === nodeId);
+  // On the upstream trail of a picked route-diff VIF (DX connection → partner
+  // device → DX location → on-prem router). Wears `.node-routediff`, a STATIC
+  // purple ring — no animation of any kind, and that is the whole requirement.
+  // Two animated treatments were tried and rejected on screen: a purple
+  // box-shadow breathing on a 1.8s loop, then `.node-spotlight`'s rotating conic
+  // sweep (adopted to match the maintenance-calendar chips, since both affordances
+  // answer "this is the thing I just named"). The calendar's ring is fine on the
+  // one node a chip points at; a route-diff pick lights a whole trail, and a row
+  // of cards each spinning a gradient reads as an alert storm. So the parity with
+  // the calendar is kept where it survives contact — the marching ants on the
+  // edges, which nobody objected to — and the nodes stay still. Any future ring
+  // here must be motionless: this is the third attempt, and motion was the defect
+  // both previous times.
+  const isRouteDiffPath = useTopologyStore((s) => nodeId != null && s.routeDiffPickedNodeIds.has(nodeId));
   const light = theme === 'light';
   const canGlow = !isFailed && !isRecommended;
 
@@ -117,7 +142,22 @@ export const BaseNode = memo(function BaseNode({
 
   // Hover-path highlight: dim everything not on the path; nodes on the path stay
   // their normal color. The contrast + the accent-colored path edges carry the signal.
-  const hoverOpacity = isDimmed ? 0.25 : undefined;
+  const hoverOpacity = isDimmed ? dimOpacityFor('node', light) : undefined;
+
+  // The top/bottom dots are connect affordances and nothing else: no discovered
+  // edge anchors to them, only a hand-drawn customer link, which can only be drawn
+  // while unlocked (`planUserEdge`). On a locked canvas they are therefore pure
+  // noise — the two cards that carry them (Customer Router, Customer Gateway) wear
+  // an orphan dot above and below on every read-only view and screenshot.
+  //
+  // Hidden rather than unmounted, deliberately: React Flow resolves an edge
+  // endpoint from the handle's *measured* bounds, so dropping the element would
+  // strand any customer link already drawn on the diagram. `pointerEvents: none`
+  // keeps an invisible dot from starting a connection drag that `onConnect`
+  // refuses while locked anyway.
+  const hiddenHandleStyle = isLocked
+    ? ({ opacity: 0, pointerEvents: 'none' } as const)
+    : undefined;
 
   return (
     <div data-node-card className="flex items-center justify-center" style={{ width: '100%', height: '100%' }}>
@@ -126,7 +166,7 @@ export const BaseNode = memo(function BaseNode({
         tabIndex={canToggleFailure ? 0 : undefined}
         aria-pressed={canToggleFailure ? isFailed : undefined}
         aria-label={canToggleFailure ? `Toggle simulated failure for ${r(label)}` : undefined}
-        className={`relative flex flex-col items-start justify-center rounded-md px-2.5 py-1.5 transition-all ${canGlow ? 'hover:brightness-110' : ''} ${isSpotlit ? 'node-spotlight' : ''} ${isPinned ? 'node-pinned' : ''}`}
+        className={`relative flex flex-col items-start justify-center rounded-md px-2.5 py-1.5 transition-all ${canGlow ? 'hover:brightness-110' : ''} ${isSpotlit ? 'node-spotlight' : ''} ${isPinned ? 'node-pinned' : ''} ${isRouteDiffPath && !isSpotlit && !isPinned ? 'node-routediff' : ''}`}
         style={{
           borderWidth: isFailed ? 2.5 : light ? 1 : 1.5,
           borderStyle: isRecommended ? 'dashed' : 'solid',
@@ -228,6 +268,25 @@ export const BaseNode = memo(function BaseNode({
             type={h.type}
             position={Position.Right}
             style={{ background: h.background ?? effectiveBorder, width: 6, height: 6 }}
+          />
+        ))}
+        {/* Only visible in unlock mode — see `hiddenHandleStyle` above. */}
+        {extraTopHandles?.map((h) => (
+          <Handle
+            key={h.id}
+            id={h.id}
+            type={h.type}
+            position={Position.Top}
+            style={{ background: h.background ?? effectiveBorder, width: 6, height: 6, ...hiddenHandleStyle }}
+          />
+        ))}
+        {extraBottomHandles?.map((h) => (
+          <Handle
+            key={h.id}
+            id={h.id}
+            type={h.type}
+            position={Position.Bottom}
+            style={{ background: h.background ?? effectiveBorder, width: 6, height: 6, ...hiddenHandleStyle }}
           />
         ))}
         {topRightOverlay && (

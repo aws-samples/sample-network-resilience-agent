@@ -42,6 +42,34 @@ describe('VIF edge aggregation', () => {
     expect(vifEdges[0].data?.aggregatedVifs).toBeUndefined();
   });
 
+  it('single-VIF label carries the VIF name above its ID', () => {
+    const topo = makeMultiVifTopology(1);
+    const { edges } = buildGraph(topo, new Set());
+
+    const vifEdge = edges.find((e) => e.source === 'awsdev-EqDC2-dev1' && e.target === 'dxgw-dxgw-001');
+    expect(vifEdge!.data?.vifName).toBe('VIF-0');
+    expect(vifEdge!.data?.label).toBe('Private VIF · VLAN 100\nVIF-0\ndxvif-000');
+  });
+
+  it('an unnamed VIF falls back to the ID alone — no blank line', () => {
+    const topo = makeMultiVifTopology(1);
+    topo.virtualInterfaces[0].virtualInterfaceName = '';
+    const { edges } = buildGraph(topo, new Set());
+
+    const vifEdge = edges.find((e) => e.source === 'awsdev-EqDC2-dev1' && e.target === 'dxgw-dxgw-001');
+    expect(vifEdge!.data?.vifName).toBeUndefined();
+    expect(vifEdge!.data?.label).toBe('Private VIF · VLAN 100\ndxvif-000');
+  });
+
+  it('a VIF named after its own ID prints the token once', () => {
+    const topo = makeMultiVifTopology(1);
+    topo.virtualInterfaces[0].virtualInterfaceName = 'dxvif-000';
+    const { edges } = buildGraph(topo, new Set());
+
+    const vifEdge = edges.find((e) => e.source === 'awsdev-EqDC2-dev1' && e.target === 'dxgw-dxgw-001');
+    expect(vifEdge!.data?.label).toBe('Private VIF · VLAN 100\ndxvif-000');
+  });
+
   it('multiple VIFs on same path are aggregated into a single edge', () => {
     const topo = makeMultiVifTopology(5);
     const { edges } = buildGraph(topo, new Set());
@@ -110,6 +138,7 @@ describe('VIF edge aggregation', () => {
     const vifEdge = edges.find((e) => e.source === 'awsdev-EqDC2-dev1' && e.target === 'dxgw-dxgw-001');
     const agg = vifEdge!.data!.aggregatedVifs!;
     expect(agg[0].vifId).toBe('dxvif-000');
+    expect(agg[0].vifName).toBe('VIF-0');
     expect(agg[0].vlan).toBe(100);
     expect(agg[1].vifId).toBe('dxvif-001');
     expect(agg[2].vifId).toBe('dxvif-002');

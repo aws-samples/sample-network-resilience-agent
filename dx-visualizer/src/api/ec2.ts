@@ -9,11 +9,12 @@ import {
   DescribeVpcPeeringConnectionsCommand,
   DescribeCustomerGatewaysCommand,
   DescribeTransitGatewayRouteTablesCommand,
+  GetTransitGatewayRouteTablePropagationsCommand,
   SearchTransitGatewayRoutesCommand,
   DescribeRouteTablesCommand,
   DescribeRegionsCommand,
 } from '@aws-sdk/client-ec2';
-import type { Vpc, VpnGateway, VpnConnection, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpcPeeringConnection, CustomerGateway, TgwRouteTable, TgwRoute, TgwRouteTableWithRoutes, VpcRouteTable, VpcRoute } from '../types/aws-resources';
+import type { Vpc, VpnGateway, VpnConnection, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpcPeeringConnection, CustomerGateway, TgwRouteTable, TgwRoute, TgwRouteTableWithRoutes, TgwRouteTablePropagation, VpcRouteTable, VpcRoute } from '../types/aws-resources';
 
 function tagsToRecord(tags: { Key?: string; Value?: string }[] | undefined): Record<string, string> {
   const result: Record<string, string> = {};
@@ -185,8 +186,10 @@ export async function fetchVpnConnections(client: EC2Client): Promise<VpnConnect
           acceptedRouteCount: t.AcceptedRouteCount,
           dpdTimeoutSeconds: opts?.dpdTimeoutSeconds,
           dpdTimeoutAction: opts?.dpdTimeoutAction,
+          lastStatusChange: t.LastStatusChange?.toISOString(),
         };
       }),
+      staticRoutesOnly: v.Options?.StaticRoutesOnly,
       tags: tagsToRecord(v.Tags),
     };
   });
@@ -221,6 +224,48 @@ export async function fetchTgwRoutes(client: EC2Client, routeTableId: string): P
     type: (r.Type === 'static' ? 'static' : 'propagated') as 'static' | 'propagated',
     state: (r.State === 'blackhole' ? 'blackhole' : 'active') as 'active' | 'blackhole',
   }));
+}
+
+/**
+ * Which attachments propagate routes INTO one TGW route table.
+ *
+ * Why this matters: SearchTransitGatewayRoutes shows what is in the table right
+ * now, which cannot distinguish "the table is empty because BGP is down" from
+ * "propagation was never enabled for this attachment". The second is the classic
+ * silent blackhole — the DX attachment looks healthy and the route table looks
+ * plausible, but traffic never moves on failover because nothing was ever
+ * propagating.
+ *
+ * Needs `ec2:GetTransitGatewayRouteTablePropagations`: a `Get*` action, so it is
+ * NOT covered by an `ec2:Describe*` wildcard. Callers must treat a thrown
+ * AccessDenied as "unknown", never as "no propagations".
+ *
+ * One call per route table, so this belongs on the on-demand path — not the
+ * login sweep.
+ */
+export async function fetchTgwRouteTablePropagations(
+  client: EC2Client,
+  routeTableId: string,
+): Promise<TgwRouteTablePropagation[]> {
+  const out: TgwRouteTablePropagation[] = [];
+  let nextToken: string | undefined;
+  do {
+    const res = await client.send(new GetTransitGatewayRouteTablePropagationsCommand({
+      TransitGatewayRouteTableId: routeTableId,
+      NextToken: nextToken,
+    }));
+    for (const p of res.TransitGatewayRouteTablePropagations ?? []) {
+      out.push({
+        transitGatewayAttachmentId: p.TransitGatewayAttachmentId ?? '',
+        resourceId: p.ResourceId ?? '',
+        resourceType: p.ResourceType ?? '',
+        // Enum is disabled | disabling | enabled | enabling.
+        state: p.State ?? '',
+      });
+    }
+    nextToken = res.NextToken;
+  } while (nextToken);
+  return out;
 }
 
 export async function fetchVpcRouteTables(client: EC2Client): Promise<VpcRouteTable[]> {
@@ -267,13 +312,37 @@ export async function fetchVpcRouteTables(client: EC2Client): Promise<VpcRouteTa
   return result;
 }
 
-export async function fetchTgwRouteTablesWithRoutes(client: EC2Client, transitGatewayId: string): Promise<TgwRouteTableWithRoutes[]> {
+/**
+ * `includePropagations` is opt-in and defaults to false: this function runs in
+ * the Phase 2 login sweep, where it already costs one call per route table, and
+ * `ec2:GetTransitGatewayRouteTablePropagations` is a Get* action most existing
+ * policies do not grant. A propagation failure degrades that table's
+ * `propagations` to `undefined` ("unknown") rather than failing the batch, so
+ * rules stay silent instead of reporting a blackhole from missing permission.
+ */
+export async function fetchTgwRouteTablesWithRoutes(
+  client: EC2Client,
+  transitGatewayId: string,
+  includePropagations = false,
+): Promise<TgwRouteTableWithRoutes[]> {
   const routeTables = await fetchTgwRouteTables(client, transitGatewayId);
   const results = await Promise.all(
-    routeTables.map(async (rt) => ({
-      routeTable: rt,
-      routes: await fetchTgwRoutes(client, rt.transitGatewayRouteTableId),
-    }))
+    routeTables.map(async (rt) => {
+      const [routes, propagations] = await Promise.all([
+        fetchTgwRoutes(client, rt.transitGatewayRouteTableId),
+        includePropagations
+          ? fetchTgwRouteTablePropagations(client, rt.transitGatewayRouteTableId).catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.warn(
+                `[AWS] TGWPropagations(${rt.transitGatewayRouteTableId}) FAILED:`,
+                msg,
+              );
+              return undefined;
+            })
+          : Promise.resolve(undefined),
+      ]);
+      return { routeTable: rt, routes, propagations };
+    })
   );
   return results;
 }

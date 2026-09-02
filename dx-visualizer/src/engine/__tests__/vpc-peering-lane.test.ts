@@ -52,9 +52,12 @@ function baseTwoRegionTopo() {
     { transitGatewayId: 'tgw-sg', transitGatewayArn: 'arn:aws:ec2:ap-southeast-1:111122223333:transit-gateway/tgw-sg', state: 'available', ownerId: '111122223333', description: '', amazonSideAsn: 64512, tags: { Name: 'SG-TGW' } },
     { transitGatewayId: 'tgw-us', transitGatewayArn: 'arn:aws:ec2:us-east-1:111122223333:transit-gateway/tgw-us', state: 'available', ownerId: '111122223333', description: '', amazonSideAsn: 64513, tags: { Name: 'US-TGW' } },
   ];
+  // Two TGWs on one DX gateway, so the allowed prefixes have to be disjoint —
+  // AWS rejects overlapping allowed prefixes across multiple TGW associations on
+  // the same DX gateway. Each list covers only the VPCs behind its own TGW.
   topo.dxGatewayAssociations = [
-    { directConnectGatewayId: 'dxgw-1', associatedGateway: { id: 'tgw-sg', type: 'transitGateway', region: 'ap-southeast-1', ownerAccount: '111122223333' }, associationState: 'associated', allowedPrefixes: ['10.0.0.0/8'] },
-    { directConnectGatewayId: 'dxgw-1', associatedGateway: { id: 'tgw-us', type: 'transitGateway', region: 'us-east-1', ownerAccount: '111122223333' }, associationState: 'associated', allowedPrefixes: ['10.0.0.0/8'] },
+    { directConnectGatewayId: 'dxgw-1', associatedGateway: { id: 'tgw-sg', type: 'transitGateway', region: 'ap-southeast-1', ownerAccount: '111122223333' }, associationState: 'associated', allowedPrefixes: ['10.0.0.0/16', '10.1.0.0/16'] },
+    { directConnectGatewayId: 'dxgw-1', associatedGateway: { id: 'tgw-us', type: 'transitGateway', region: 'us-east-1', ownerAccount: '111122223333' }, associationState: 'associated', allowedPrefixes: ['10.2.0.0/16'] },
   ];
   topo.vpcs = [
     { vpcId: 'vpc-sg1', cidrBlock: '10.0.0.0/16', region: 'ap-southeast-1', ownerAccountId: '111122223333', tags: { Name: 'sg-vpc-1' }, state: 'available' },

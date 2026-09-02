@@ -86,28 +86,106 @@ async function fetchAllAffectedEntities(
 }
 
 /**
- * Fetch every scheduled-change DX event, following pagination.
+ * How far back to look for `issue` events.
+ *
+ * Unlike scheduled changes, issues are past-dated and unbounded — an account
+ * could have years of them, and without a floor the MAX_PAGES valve would silently
+ * truncate an arbitrary slice. 90 days is long enough to cover "did an AWS-side
+ * DX problem hit us recently" while keeping the result set small.
+ *
+ * Exported so the calendar's legend states the same window the fetch used,
+ * instead of hardcoding a number that could drift out of step with it.
+ */
+export const ISSUE_LOOKBACK_DAYS = 90;
+
+/**
+ * `entityValue` strings that are sentinels, not resource IDs.
+ *
+ * DescribeAffectedEntities always answers — even when AWS holds no
+ * resource-level mapping for the event — and when it has none it answers with a
+ * placeholder string instead of omitting the entity:
+ *
+ *  - `UNKNOWN`     — region-wide (`PUBLIC`) events, which AWS never maps down to
+ *                    one account's resources. Returned with no `entityArn` and no
+ *                    `awsAccountId`.
+ *  - `AWS_ACCOUNT` — `ACCOUNT_SPECIFIC` scope, but flagged at account level: AWS
+ *                    confirms this account was hit and names no connection or VIF.
+ *
+ * Verified against a live DX estate: every `issue` event lands on one of these
+ * two, and only `scheduledChange` events return real `dxcon-*`/`dxvif-*` values.
+ * Letting a sentinel through renders it as a clickable resource chip, which is
+ * how the calendar came to show a dead chip reading "UNKNOWN" — the string was
+ * AWS's, but presenting it as a resource ID was ours. Callers that need to say
+ * *why* the list is empty should branch on `eventScopeCode`, which is preserved.
+ *
+ * Exported so the UI can apply the same filter to snapshots captured before this
+ * existed, which still carry the sentinels inside `affectedResourceIds`.
+ */
+export const NON_RESOURCE_ENTITY_VALUES: ReadonlySet<string> = new Set([
+  'UNKNOWN',
+  'AWS_ACCOUNT',
+]);
+
+/**
+ * Fetch DX events, following pagination.
+ *
+ * Two different questions, so two different filters — a single combined call
+ * cannot express them, because `eventStatusCodes` and the time window differ:
+ *
+ *  - scheduledChange: only `upcoming`/`open`, no time floor. Planned maintenance
+ *    the customer can still act on.
+ *  - issue: `closed` too, floored at ISSUE_LOOKBACK_DAYS. These are AWS-side DX
+ *    problems that already happened — ground truth for whether the customer's
+ *    redundancy was actually exercised. Almost all are closed by the time we ask,
+ *    so omitting `closed` would return nearly nothing.
  *
  * `maxResults` is only a page size, never a total: an account with more events
  * than fit one page would otherwise have the remainder disappear from the
  * calendar.
  */
 async function fetchAllEvents(client: ReturnType<typeof createHealthClient>) {
-  return drainPages('events', async (nextToken) => {
-    const res = await client.send(
-      new DescribeEventsCommand({
-        filter: {
-          services: ['DIRECTCONNECT'],
-          eventTypeCategories: ['scheduledChange'],
-          // Only currently-relevant events (upcoming or in-progress)
-          eventStatusCodes: ['upcoming', 'open'],
-        },
-        maxResults: PAGE_SIZE,
-        nextToken,
-      }),
-    );
-    return { items: res.events ?? [], nextToken: res.nextToken };
-  });
+  const issueFloor = new Date(Date.now() - ISSUE_LOOKBACK_DAYS * 86_400_000);
+
+  const [scheduled, issues] = await Promise.all([
+    drainPages('scheduled changes', async (nextToken) => {
+      const res = await client.send(
+        new DescribeEventsCommand({
+          filter: {
+            services: ['DIRECTCONNECT'],
+            eventTypeCategories: ['scheduledChange'],
+            // Only currently-relevant events (upcoming or in-progress)
+            eventStatusCodes: ['upcoming', 'open'],
+          },
+          maxResults: PAGE_SIZE,
+          nextToken,
+        }),
+      );
+      return { items: res.events ?? [], nextToken: res.nextToken };
+    }),
+    drainPages('issues', async (nextToken) => {
+      const res = await client.send(
+        new DescribeEventsCommand({
+          filter: {
+            services: ['DIRECTCONNECT'],
+            eventTypeCategories: ['issue'],
+            eventStatusCodes: ['open', 'upcoming', 'closed'],
+            // Bounded, or an old account pages forever and hits MAX_PAGES.
+            startTimes: [{ from: issueFloor }],
+          },
+          maxResults: PAGE_SIZE,
+          nextToken,
+        }),
+      );
+      return { items: res.events ?? [], nextToken: res.nextToken };
+    }),
+  ]);
+
+  // Tag each event with its category so the UI can tell a planned change from an
+  // outage that already happened. The two filters are disjoint, so no dedupe.
+  return [
+    ...scheduled.map((e) => ({ event: e, category: 'scheduledChange' as const })),
+    ...issues.map((e) => ({ event: e, category: 'issue' as const })),
+  ];
 }
 
 /**
@@ -141,12 +219,16 @@ export async function fetchDxMaintenanceEvents(
   try {
     const client = createHealthClient(creds);
 
-    const events = await fetchAllEvents(client);
-    if (events.length === 0) {
+    const tagged = await fetchAllEvents(client);
+    if (tagged.length === 0) {
       console.log('[AWS] Health: no Direct Connect maintenance events');
       return [];
     }
 
+    const events = tagged.map((t) => t.event);
+    const categoryByArn = new Map(
+      tagged.filter((t) => !!t.event.arn).map((t) => [t.event.arn!, t.category]),
+    );
     const eventArns = events.map((e) => e.arn).filter((a): a is string => !!a);
 
     // Fetch descriptions and affected entity IDs in parallel
@@ -165,6 +247,8 @@ export async function fetchDxMaintenanceEvents(
     const entitiesByArn = new Map<string, string[]>();
     for (const ent of affectedEntities) {
       if (!ent.eventArn || !ent.entityValue) continue;
+      // Keep sentinels out: they are AWS saying "no resource mapping", not an ID.
+      if (NON_RESOURCE_ENTITY_VALUES.has(ent.entityValue)) continue;
       const list = entitiesByArn.get(ent.eventArn) ?? [];
       list.push(ent.entityValue);
       entitiesByArn.set(ent.eventArn, list);
@@ -182,9 +266,23 @@ export async function fetchDxMaintenanceEvents(
         statusCode: e.statusCode ?? '',
         affectedResourceIds: entitiesByArn.get(e.arn!) ?? [],
         description: descriptionByArn.get(e.arn!) ?? '',
+        eventTypeCategory: categoryByArn.get(e.arn!),
+        // Carried through so the calendar can tell a region-wide broadcast from
+        // an event AWS attributes to this account — the two need opposite
+        // treatment when no resource IDs come back.
+        eventScopeCode: e.eventScopeCode as DxMaintenanceEvent['eventScopeCode'],
       }));
 
-    console.log(`[AWS] Health: ${result.length} Direct Connect maintenance event(s)`);
+    const issueCount = result.filter((e) => e.eventTypeCategory === 'issue').length;
+    // Scope is worth logging: PUBLIC events arrive for every region regardless of
+    // footprint, so a surprising event count is usually region-wide noise rather
+    // than something touching this account.
+    const publicCount = result.filter((e) => e.eventScopeCode === 'PUBLIC').length;
+    console.log(
+      `[AWS] Health: ${result.length} Direct Connect event(s) — ${
+        result.length - issueCount
+      } scheduled change(s), ${issueCount} issue(s) in the last ${ISSUE_LOOKBACK_DAYS} days; ${publicCount} region-wide (PUBLIC)`,
+    );
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

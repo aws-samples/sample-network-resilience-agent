@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redact } from '../redact';
+import { redact, redactAsn, redactCommunity } from '../redact';
 
 describe('redact (off)', () => {
   it('returns input verbatim when flag is false', () => {
@@ -125,5 +125,42 @@ describe('redact (on) — account legend context', () => {
 
   it('masks account ID embedded in parenthetical', () => {
     expect(redact('(123456789012)', true)).toBe('(••••-••••-••••)');
+  });
+});
+
+describe('redactAsn', () => {
+  it('returns the ASN verbatim when off', () => {
+    expect(redactAsn(65000, false)).toBe('65000');
+  });
+
+  it('masks a bare ASN that the generic masker would miss', () => {
+    // The generic masker only matches labelled ASNs ("ASN: 65000"), so BGP
+    // AS-path entries need this dedicated path.
+    expect(redact('65000', true)).toBe('65000');
+    expect(redactAsn(65000, true)).toBe('••••••');
+  });
+
+  it('handles null and undefined', () => {
+    expect(redactAsn(undefined, true)).toBe('');
+    expect(redactAsn(null, true)).toBe('');
+  });
+});
+
+describe('redactCommunity', () => {
+  it('returns the community verbatim when off', () => {
+    expect(redactCommunity('7224:8100', false)).toBe('7224:8100');
+  });
+
+  it('masks the ASN half but keeps the value half readable', () => {
+    // 7224:8100 etc. carry the routing intent an operator needs to read.
+    expect(redactCommunity('7224:8100', true)).toBe('••••••:8100');
+  });
+
+  it('fully masks a community that is not in asn:value form', () => {
+    expect(redactCommunity('NO_EXPORT', true)).toBe('••••••••');
+  });
+
+  it('handles empty input', () => {
+    expect(redactCommunity(undefined, true)).toBe('');
   });
 });

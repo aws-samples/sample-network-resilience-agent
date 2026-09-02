@@ -22,6 +22,10 @@ import type {
   VpcRouteTable,
   CloudWanSegmentRoutes,
   DxMaintenanceEvent,
+  VifRoutes,
+  BgpPrefixMetrics,
+  BgpSessionStability,
+  VifFailoverTest,
 } from './aws-resources';
 
 export interface TopologyData {
@@ -46,7 +50,22 @@ export interface TopologyData {
   /** VPC route tables keyed by vpcId. Each entry includes routes + subnet associations. */
   vpcRouteTables: Map<string, VpcRouteTable[]>;
   cloudWanRoutes: Map<string, CloudWanSegmentRoutes[]>;
-  bgpPrefixMetrics?: Map<string, { accepted?: number; advertised?: number }>;
+  // `accepted`/`advertised` are IPv4+IPv6 pooled (display); `byFamily` carries
+  // the per-address-family split, which is what the 100-prefix quota check must
+  // read — the limit is 100 *each* for IPv4 and IPv6.
+  bgpPrefixMetrics?: Map<string, BgpPrefixMetrics>;
+  // BGP flap history per VIF, keyed by virtualInterfaceId. Populated on demand
+  // (billed per metric retrieved) — see loadBgpStability() in the store.
+  bgpStability?: Map<string, BgpSessionStability>;
+  // Recorded BGP failover tests per VIF, keyed by virtualInterfaceId, from
+  // ListVirtualInterfaceTestHistory. Populated on demand. An entry with an empty
+  // array means "queried, none on record"; a MISSING entry means "not queried" —
+  // ruleDxFailoverTesting depends on that distinction.
+  vifFailoverTests?: Map<string, VifFailoverTest[]>;
+  // Actual BGP prefixes exchanged per VIF, keyed by virtualInterfaceId, from
+  // ListVirtualInterfaceRoutes. Populated only when the user enables the
+  // "BGP Routes" overlay — see loadVifRoutes() in the store.
+  vifRoutes?: Map<string, VifRoutes>;
   vifUtilization?: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>;
   connectionUtilization?: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>;
   utilizationWindowDays?: 30 | 60 | 90;
@@ -217,8 +236,18 @@ export type DxEdge = Edge & {
     vifState?: string;
     bgpStatus?: string;
     vifId?: string;
+    // DescribeVirtualInterfaces.virtualInterfaceName — the customer's own name
+    // for the VIF, which is how they refer to it in a ticket or a console
+    // search. Optional because AWS returns it empty for unnamed VIFs; the label
+    // then falls back to the ID alone rather than printing a blank line.
+    vifName?: string;
     prefixesAccepted?: number;
     prefixesAdvertised?: number;
+    // True when ListVirtualInterfaceRoutes returned routes for this VIF, so the
+    // edge label can offer a "Routes" affordance. The routes themselves live in
+    // TopologyData.vifRoutes and are read by VifRoutePanel — only the flag
+    // travels on the edge, to keep edge data cheap to diff.
+    hasRouteData?: boolean;
     // Peak hourly bitrate over the user-selected window (30/60/90 days) from
     // CloudWatch (AWS/DX namespace). Populated only when the user enables
     // "Show utilization" in live mode.
@@ -227,6 +256,9 @@ export type DxEdge = Edge & {
     // Underlying connection bandwidth string (e.g. "1Gbps") — used to format
     // utilization as a percentage of capacity on VIF edges.
     connectionBandwidth?: string;
+    // Per-VIF bandwidth cap from DescribeVirtualInterfaces.rateLimit. When
+    // present this, not connectionBandwidth, is the utilization denominator.
+    vifRateLimit?: string;
     labelPosition?: number;
     sourceHandle?: string;
     targetHandle?: string;
@@ -235,6 +267,13 @@ export type DxEdge = Edge & {
     // highlights only the single edge + its two endpoints, not a full E2E BFS
     // path — a peering is a point-to-point relationship, not an upstream path.
     isPeering?: boolean;
+    // Excludes the edge from the directed path graph: it is a cable between two
+    // devices that back each other up, not a step along anyone's path. The
+    // end-to-end traversal attaches it (and the device at the far end) to a path
+    // it touches, then stops, so the highlight cannot depend on which end the
+    // edge happens to be drawn from. Set on user-drawn Customer Links, whose
+    // direction is a purely cosmetic routing choice.
+    isLateral?: boolean;
     // For VPC↔VPC peering edges: whether both endpoints sit in the SAME region
     // ('intra') or different regions ('cross'). Drives lane routing — intra
     // peerings stay inside their region box with a fixed lane offset; cross
@@ -253,12 +292,15 @@ export type DxEdge = Edge & {
 
 export interface AggregatedVifInfo {
   vifId: string;
+  vifName?: string;
   vifType: 'private' | 'transit' | 'public';
   vlan: number;
   vifState: string;
   bgpStatus?: string;
   prefixesAccepted?: number;
   prefixesAdvertised?: number;
+  hasRouteData?: boolean;
+  vifRateLimit?: string;
   utilizationIngressBps?: number;
   utilizationEgressBps?: number;
   connectionBandwidth?: string;

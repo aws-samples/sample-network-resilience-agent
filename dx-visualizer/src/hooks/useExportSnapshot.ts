@@ -92,6 +92,11 @@ export function useExportSnapshot() {
       vifUtilization: td.vifUtilization ?? activeCached?.vif,
       connectionUtilization: td.connectionUtilization ?? activeCached?.connection,
       utilizationWindowDays: td.utilizationWindowDays ?? activeWindow,
+      // BGP routes ship only if the customer actually fetched them. Unlike
+      // utilization there's no auto-fetch here on purpose: routes are the
+      // customer's real on-prem prefixes, so pulling them into every export
+      // unprompted would widen what leaves their account by default.
+      vifRoutes: td.vifRoutes ?? state.vifRoutesCache ?? undefined,
     };
 
     // Single Sanitizer instance so the topology's pseudo IDs match the
@@ -117,9 +122,14 @@ export function useExportSnapshot() {
       (enrichedTopology.connectionUtilization?.size ?? 0) > 0 ||
       utilizationCache.length > 0;
 
+    const hasRoutesToShip = (enrichedTopology.vifRoutes?.size ?? 0) > 0;
+
     const view: SerializedView = {
       viewMode: state.viewMode,
-      showLiveStatus: state.showLiveStatus,
+      // The edge Routes buttons render inside the live-status layer, so shipping
+      // routes with live status off would leave the SA staring at a snapshot
+      // whose routes are present but unreachable.
+      showLiveStatus: state.showLiveStatus || hasRoutesToShip,
       showUtilization: state.showUtilization || hasMetricsToShip,
       utilizationWindowDays: state.utilizationWindowDays,
       focusedDxGatewayId: state.focusedDxGatewayId,
@@ -135,6 +145,9 @@ export function useExportSnapshot() {
       vpcGroupViewMode: [...state.vpcGroupViewMode.entries()],
       isolatedTgwGroupViewMode: [...state.isolatedTgwGroupViewMode.entries()],
       showVpcs: state.showVpcs,
+      // The filter travels as a preference while the VPN data itself stays in
+      // the snapshot, so whoever opens it can put VPN back on the canvas.
+      showVpn: state.showVpn,
       showNonDxVpcs: [...state.showNonDxVpcs],
       expandedUnattachedZone: state.expandedUnattachedZone,
       expandedHiddenAssocZone: state.expandedHiddenAssocZone,

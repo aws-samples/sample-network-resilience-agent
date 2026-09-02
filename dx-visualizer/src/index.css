@@ -251,16 +251,44 @@ body {
   }
 }
 
-/* Edge spotlight — marching-ants stroke layered over a soft purple glow
-   underneath an existing edge. Mirrors `.node-spotlight` semantically so a
-   dxvif-* chip in the maintenance calendar can point at the actual VIF edge
-   instead of the DXGW it terminates on. */
+/* Edge spotlight — marching-ants stroke laid over an existing edge. Mirrors
+   `.node-spotlight` semantically so a dxvif-* chip in the maintenance calendar
+   can point at the actual VIF edge instead of the DXGW it terminates on. Also
+   carries route-diff picks: same question, so the same signal. (Route-diff used
+   to own a separate purple aura + violet march at 1.8s, deliberately unlike this
+   one — which is exactly why it read as an unrelated kind of alert.) */
 @keyframes edge-spotlight-march {
   to { stroke-dashoffset: -40; }
 }
 
 .edge-spotlight-march {
   animation: edge-spotlight-march 1.2s linear infinite;
+}
+
+/* Route-diff trail node — every hop between a picked VIF and the on-premises
+   router, so the reader can trace which physical DX connection that VIF rides.
+
+   Static by requirement. Same ring geometry as `.node-spotlight` (inset -3px,
+   2px masked border) so a lit trail and a calendar-lit node read as the same
+   family, but a flat brand purple instead of the conic gradient and NO animation
+   — no spin, no pulse. Two animated versions were rejected in review: a 1.8s
+   breathing box-shadow, then the spotlight's own rotating sweep. The spotlight
+   marks a single node; this marks a path several cards long, and that is the
+   difference the shared style could not absorb. Do not add an `animation` here. */
+.node-routediff::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  padding: 2px;
+  background: #8b5cf6;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  z-index: 2;
 }
 
 /* Pulse animation for live connection indicator */

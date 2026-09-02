@@ -357,28 +357,35 @@ function buildChecklist(
     });
   }
 
-  if (recommendations.some((r) => r.ruleId === 'consistent-prefix-advertisement')) {
-    bestPracticeChecklist.push({
-      label: 'Advertise the same prefixes across redundant VIFs',
-      met: false,
-      detail: 'Validate that the same BGP prefixes are learned and advertised across redundant Virtual Interfaces. Asymmetric advertisement leaves the failover path with different reachability and can cause traffic blackholes during a failover. BGP route state is not available via the AWS API — verify from your customer router.',
-      severity: 'info',
-      group: 'configuration',
-    });
+  // Prefix-consistency and summarization both read their text straight off the
+  // recommendation: when the BGP Routes overlay has real data these become
+  // evidence-based findings (and can be "met"), and without it they fall back to
+  // the rule's guidance wording. Don't re-hardcode the copy here.
+  {
+    const prefixRec = recommendations.find((r) => r.ruleId === 'consistent-prefix-advertisement');
+    if (prefixRec) {
+      bestPracticeChecklist.push({
+        label: prefixRec.title,
+        // Only the verified-matching outcome is a pass; guidance and mismatch are not.
+        met: prefixRec.severity === 'info' && /matching prefix sets/i.test(prefixRec.title),
+        detail: prefixRec.description,
+        severity: prefixRec.severity,
+        group: 'configuration',
+      });
+    }
   }
 
-  if (recommendations.some((r) => r.ruleId === 'vif-route-symmetry')) {
-    bestPracticeChecklist.push({
-      label: 'Summarize prefixes and keep VIF routing symmetric',
-      met: false,
-      detail: (
-        <span>
-          <strong>Route summarization</strong> — advertising individual /24s will exhaust the 100-prefix limit rapidly. Consolidate into aggregate prefixes. All VIFs attached to the same DXGW or VGW serving the same routing domain should advertise and receive identical prefix sets with consistent BGP attributes (local preference, AS_PATH length, etc.) unless traffic manipulation is required. BGP route state is not available via the AWS API — verify from your customer router.
-        </span>
-      ),
-      severity: 'info',
-      group: 'configuration',
-    });
+  {
+    const symmetryRec = recommendations.find((r) => r.ruleId === 'vif-route-symmetry');
+    if (symmetryRec) {
+      bestPracticeChecklist.push({
+        label: symmetryRec.title,
+        met: false,
+        detail: symmetryRec.description,
+        severity: symmetryRec.severity,
+        group: 'configuration',
+      });
+    }
   }
 
   if (recommendations.some((r) => r.ruleId === 'lag-min-links')) {

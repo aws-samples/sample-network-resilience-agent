@@ -60,10 +60,43 @@ export function redact(input: string | undefined | null, on: boolean): string {
   return MASKERS.reduce((s, { re, replace }) => s.replace(re, replace), input);
 }
 
+// Bare ASN masker for callers that KNOW the number is an ASN — e.g. a BGP
+// AS path, where the ASNs arrive as plain integers with no "ASN:" label for
+// the pattern above to latch onto. Kept separate rather than added to MASKERS
+// because a bare-number rule there would munge VLANs, bandwidths, and counts.
+export function redactAsn(asn: number | string | undefined | null, on: boolean): string {
+  const raw = asn == null ? '' : String(asn);
+  if (!on || !raw) return raw;
+  return repeat(6);
+}
+
+// BGP community, conventionally "asn:value" (e.g. "7224:8100"). Only the ASN
+// half identifies a network, so the value half survives — it's what carries the
+// routing intent an operator needs to read. Matches how the snapshot Sanitizer
+// treats communities.
+export function redactCommunity(community: string | undefined | null, on: boolean): string {
+  const raw = community ?? '';
+  if (!on || !raw) return raw;
+  const parts = raw.split(':');
+  if (parts.length !== 2) return repeat(8);
+  return `${repeat(6)}:${parts[1]}`;
+}
+
 // Hook variant — components subscribe to the store flag once and get a
 // stable function back. The closure over `on` means React rerenders the
 // component when the flag flips, which is exactly what we want.
 export function useRedact(): (s: string | undefined | null) => string {
   const on = useTopologyStore((s) => s.redactMode);
   return (s: string | undefined | null) => redact(s, on);
+}
+
+// Hook variants of the ASN/community maskers above, for the BGP route panel.
+export function useRedactAsn(): (asn: number | string | undefined | null) => string {
+  const on = useTopologyStore((s) => s.redactMode);
+  return (asn) => redactAsn(asn, on);
+}
+
+export function useRedactCommunity(): (c: string | undefined | null) => string {
+  const on = useTopologyStore((s) => s.redactMode);
+  return (c) => redactCommunity(c, on);
 }

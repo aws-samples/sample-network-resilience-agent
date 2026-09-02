@@ -12,8 +12,16 @@ vi.mock('../aws-client', () => ({
 // these stubs assign in the body.
 vi.mock('@aws-sdk/client-health', () => {
   class DescribeEventsCommand {
-    input: { maxResults?: number; nextToken?: string };
-    constructor(input: { maxResults?: number; nextToken?: string }) {
+    input: {
+      filter?: { eventTypeCategories?: string[]; eventStatusCodes?: string[]; startTimes?: unknown[] };
+      maxResults?: number;
+      nextToken?: string;
+    };
+    constructor(input: {
+      filter?: { eventTypeCategories?: string[]; eventStatusCodes?: string[]; startTimes?: unknown[] };
+      maxResults?: number;
+      nextToken?: string;
+    }) {
       this.input = input;
     }
   }
@@ -51,6 +59,17 @@ function event(arn: string, region: string) {
     lastUpdatedTime: new Date('2026-07-23T12:00:00Z'),
     statusCode: 'upcoming',
   };
+}
+
+/**
+ * fetchDxMaintenanceEvents issues TWO DescribeEvents queries — one for
+ * scheduledChange, one for issue — because their status codes and time windows
+ * differ. Tests that care about only one category use this to answer the other
+ * with an empty page; without it the same events come back twice and every count
+ * doubles.
+ */
+function isIssueQuery(cmd: { input: { filter?: { eventTypeCategories?: string[] } } }): boolean {
+  return cmd.input.filter?.eventTypeCategories?.includes('issue') ?? false;
 }
 
 describe('fetchDxMaintenanceEvents', () => {
@@ -144,6 +163,7 @@ describe('fetchDxMaintenanceEvents', () => {
   it('follows nextToken on DescribeEvents so later events are not dropped', async () => {
     sendMock.mockImplementation((cmd: unknown) => {
       if (cmd instanceof DescribeEventsCommand) {
+        if (isIssueQuery(cmd)) return Promise.resolve({ events: [] });
         return cmd.input.nextToken
           ? Promise.resolve({ events: [event(ARN_B, 'ap-northeast-3')] })
           : Promise.resolve({ events: [event(ARN_A, 'ap-northeast-1')], nextToken: 'more' });
@@ -163,6 +183,7 @@ describe('fetchDxMaintenanceEvents', () => {
     const many = Array.from({ length: 23 }, (_, i) => `${ARN_A}-${i}`);
     sendMock.mockImplementation((cmd: unknown) => {
       if (cmd instanceof DescribeEventsCommand) {
+        if (isIssueQuery(cmd)) return Promise.resolve({ events: [] });
         return Promise.resolve({ events: many.map((a) => event(a, 'ap-northeast-1')) });
       }
       if (cmd instanceof DescribeEventDetailsCommand) {
@@ -191,8 +212,131 @@ describe('fetchDxMaintenanceEvents', () => {
     expect(result.every((e) => e.description.startsWith('desc '))).toBe(true);
   });
 
+  // Scheduled changes alone answer "what is AWS about to do to me". Issues answer
+  // "did an AWS-side DX problem already hit me" — the ground truth for whether
+  // redundancy was actually exercised. The app was blind to the second.
+  it('fetches both scheduledChange and issue events, tagging each', async () => {
+    const ISSUE_ARN = 'arn:aws:health:ap-northeast-1::event/DIRECTCONNECT/Y/ISSUE';
+    sendMock.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof DescribeEventsCommand) {
+        return Promise.resolve({
+          events: isIssueQuery(cmd)
+            ? [event(ISSUE_ARN, 'ap-northeast-1')]
+            : [event(ARN_A, 'ap-northeast-1')],
+        });
+      }
+      if (cmd instanceof DescribeEventDetailsCommand) return Promise.resolve({ successfulSet: [] });
+      return Promise.resolve({ entities: [] });
+    });
+
+    const result = await fetchDxMaintenanceEvents(CREDS);
+
+    expect(result.map((e) => e.arn).sort()).toEqual([ARN_A, ISSUE_ARN].sort());
+    expect(result.find((e) => e.arn === ARN_A)!.eventTypeCategory).toBe('scheduledChange');
+    expect(result.find((e) => e.arn === ISSUE_ARN)!.eventTypeCategory).toBe('issue');
+  });
+
+  it('bounds the issue query by time but leaves scheduled changes unbounded', async () => {
+    sendMock.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof DescribeEventsCommand) return Promise.resolve({ events: [] });
+      return Promise.resolve({ entities: [] });
+    });
+
+    await fetchDxMaintenanceEvents(CREDS);
+
+    const queries = sendMock.mock.calls
+      .map(([cmd]) => cmd)
+      .filter((cmd) => cmd instanceof DescribeEventsCommand) as {
+      input: { filter?: { eventTypeCategories?: string[]; eventStatusCodes?: string[]; startTimes?: unknown[] } };
+    }[];
+    const issue = queries.find((q) => q.input.filter?.eventTypeCategories?.includes('issue'));
+    const scheduled = queries.find((q) =>
+      q.input.filter?.eventTypeCategories?.includes('scheduledChange'),
+    );
+
+    // Issues are past-dated and unbounded, so a floor is required or MAX_PAGES
+    // silently truncates an arbitrary slice of history.
+    expect(issue!.input.filter?.startTimes).toBeDefined();
+    // And they are almost always closed by the time we ask.
+    expect(issue!.input.filter?.eventStatusCodes).toContain('closed');
+    // Scheduled changes stay upcoming/open with no floor — the calendar is
+    // forward-looking.
+    expect(scheduled!.input.filter?.startTimes).toBeUndefined();
+    expect(scheduled!.input.filter?.eventStatusCodes).not.toContain('closed');
+  });
+
   it('returns an empty list when the account lacks a qualifying support plan', async () => {
     sendMock.mockRejectedValue(new Error('SubscriptionRequiredException: ...'));
     await expect(fetchDxMaintenanceEvents(CREDS)).resolves.toEqual([]);
+  });
+
+  // DescribeAffectedEntities always answers, and when AWS holds no resource-level
+  // mapping it answers with a placeholder string instead of omitting the entity.
+  // Both shapes below were captured live: `UNKNOWN` for a region-wide (PUBLIC)
+  // event, `AWS_ACCOUNT` for an account-scoped issue. Passing them through made
+  // the calendar render a dead resource chip reading "UNKNOWN".
+  it.each(['UNKNOWN', 'AWS_ACCOUNT'])(
+    'keeps the sentinel entityValue %s out of affectedResourceIds',
+    async (sentinel) => {
+      sendMock.mockImplementation((cmd: unknown) => {
+        if (cmd instanceof DescribeEventsCommand) {
+          if (isIssueQuery(cmd)) return Promise.resolve({ events: [] });
+          return Promise.resolve({ events: [event(ARN_A, 'ap-northeast-1')] });
+        }
+        if (cmd instanceof DescribeEventDetailsCommand) return Promise.resolve({ successfulSet: [] });
+        return Promise.resolve({
+          entities: [
+            { eventArn: ARN_A, entityValue: sentinel },
+            { eventArn: ARN_A, entityValue: 'dxvif-real01' },
+          ],
+        });
+      });
+
+      const result = await fetchDxMaintenanceEvents(CREDS);
+
+      // The real ID survives; only the placeholder is dropped.
+      expect(result[0].affectedResourceIds).toEqual(['dxvif-real01']);
+    },
+  );
+
+  // Scope is what lets the calendar tell a region-wide broadcast from an event AWS
+  // attributes to this account — the two need opposite treatment when no resource
+  // IDs come back, and only the first is safe to filter out by region.
+  it('preserves eventScopeCode from DescribeEvents', async () => {
+    const PUBLIC_ARN = 'arn:aws:health:eu-central-1::event/DIRECTCONNECT/Z/PUB';
+    sendMock.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof DescribeEventsCommand) {
+        return Promise.resolve({
+          events: isIssueQuery(cmd)
+            ? [{ ...event(PUBLIC_ARN, 'eu-central-1'), eventScopeCode: 'PUBLIC' }]
+            : [{ ...event(ARN_A, 'ap-northeast-1'), eventScopeCode: 'ACCOUNT_SPECIFIC' }],
+        });
+      }
+      if (cmd instanceof DescribeEventDetailsCommand) return Promise.resolve({ successfulSet: [] });
+      return Promise.resolve({ entities: [] });
+    });
+
+    const result = await fetchDxMaintenanceEvents(CREDS);
+
+    const byArn = new Map(result.map((e) => [e.arn, e.eventScopeCode]));
+    expect(byArn.get(PUBLIC_ARN)).toBe('PUBLIC');
+    expect(byArn.get(ARN_A)).toBe('ACCOUNT_SPECIFIC');
+  });
+
+  it('leaves eventScopeCode undefined when AWS omits it', async () => {
+    // Never defaulted to PUBLIC: the region filter treats PUBLIC as safe to hide,
+    // so a guessed scope would drop events it cannot actually classify.
+    sendMock.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof DescribeEventsCommand) {
+        if (isIssueQuery(cmd)) return Promise.resolve({ events: [] });
+        return Promise.resolve({ events: [event(ARN_A, 'ap-northeast-1')] });
+      }
+      if (cmd instanceof DescribeEventDetailsCommand) return Promise.resolve({ successfulSet: [] });
+      return Promise.resolve({ entities: [] });
+    });
+
+    const result = await fetchDxMaintenanceEvents(CREDS);
+
+    expect(result[0].eventScopeCode).toBeUndefined();
   });
 });
