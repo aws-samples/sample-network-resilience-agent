@@ -14,9 +14,16 @@ import type {
   TgwRouteTableWithRoutes,
   VpcRouteTable,
   CloudWanSegmentRoutes,
+  VifRoutes,
+  BgpPrefixMetrics,
+  BgpSessionStability,
+  VifFailoverTest,
 } from '../types/aws-resources';
 
-export const SNAPSHOT_SCHEMA_VERSION = 1;
+// v2 added `topology.vifRoutes` (BGP route visibility). v1 files are still
+// accepted — the new field is optional and simply absent.
+export const SNAPSHOT_SCHEMA_VERSION = 2;
+const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
 
 type Tuple<K, V> = [K, V];
 
@@ -41,7 +48,15 @@ export interface SerializedTopologyData {
   tgwRouteTables: Tuple<string, TgwRouteTableWithRoutes[]>[];
   vpcRouteTables: Tuple<string, VpcRouteTable[]>[];
   cloudWanRoutes: Tuple<string, CloudWanSegmentRoutes[]>[];
-  bgpPrefixMetrics?: Tuple<string, { accepted?: number; advertised?: number }>[];
+  // `byFamily` (per-address-family prefix counts) is absent in snapshots written
+  // before it existed; ruleBgpRouteLimit falls back to the pooled totals.
+  bgpPrefixMetrics?: Tuple<string, BgpPrefixMetrics>[];
+  /** BGP flap history. Absent unless the customer fetched it before exporting. */
+  bgpStability?: Tuple<string, BgpSessionStability>[];
+  /** Recorded failover tests. Absent unless fetched before exporting. */
+  vifFailoverTests?: Tuple<string, VifFailoverTest[]>[];
+  // Schema v2+. Absent in v1 snapshots.
+  vifRoutes?: Tuple<string, VifRoutes>[];
   vifUtilization?: Tuple<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>[];
   connectionUtilization?: Tuple<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>[];
   utilizationWindowDays?: 30 | 60 | 90;
@@ -59,6 +74,10 @@ export interface SerializedView {
   viewMode: ViewMode;
   showLiveStatus: boolean;
   showUtilization: boolean;
+  // Accepted but no longer written or read: BGP routes have no overlay toggle of
+  // their own — the edge "Routes" button in live mode drives them. Kept in the
+  // type so v2 files written while the toggle existed still validate.
+  showVifRoutes?: boolean;
   utilizationWindowDays: 30 | 60 | 90;
   focusedDxGatewayId: string | null;
   resiliencyTargets: Record<string, ResiliencyTarget>;
@@ -73,6 +92,9 @@ export interface SerializedView {
   vpcGroupViewMode: Tuple<string, 'table'>[];
   isolatedTgwGroupViewMode: Tuple<string, 'table'>[];
   showVpcs: boolean;
+  // Optional: snapshots predating the VPN filter have no value here, and they
+  // were all taken with VPN visible. Import defaults it to true.
+  showVpn?: boolean;
   showNonDxVpcs: string[];
   expandedUnattachedZone: boolean;
   expandedHiddenAssocZone: boolean;
@@ -93,7 +115,9 @@ export interface SerializedCustomizations {
 }
 
 export interface SnapshotFile {
-  schemaVersion: typeof SNAPSHOT_SCHEMA_VERSION;
+  // Not narrowed to the current version — validateSnapshot() accepts any
+  // supported version, and v1 files stay importable.
+  schemaVersion: number;
   exportedAt: string;
   appVersion?: string;
   redactedView: boolean;
@@ -126,6 +150,9 @@ export function serializeTopologyData(td: TopologyData): SerializedTopologyData 
     vpcRouteTables: [...td.vpcRouteTables.entries()],
     cloudWanRoutes: [...td.cloudWanRoutes.entries()],
     bgpPrefixMetrics: td.bgpPrefixMetrics ? [...td.bgpPrefixMetrics.entries()] : undefined,
+    bgpStability: td.bgpStability ? [...td.bgpStability.entries()] : undefined,
+    vifFailoverTests: td.vifFailoverTests ? [...td.vifFailoverTests.entries()] : undefined,
+    vifRoutes: td.vifRoutes ? [...td.vifRoutes.entries()] : undefined,
     vifUtilization: td.vifUtilization ? [...td.vifUtilization.entries()] : undefined,
     connectionUtilization: td.connectionUtilization ? [...td.connectionUtilization.entries()] : undefined,
     utilizationWindowDays: td.utilizationWindowDays,
@@ -158,6 +185,9 @@ export function deserializeTopologyData(s: SerializedTopologyData): TopologyData
     vpcRouteTables: new Map(s.vpcRouteTables ?? []),
     cloudWanRoutes: new Map(s.cloudWanRoutes ?? []),
     bgpPrefixMetrics: s.bgpPrefixMetrics ? new Map(s.bgpPrefixMetrics) : undefined,
+    bgpStability: s.bgpStability ? new Map(s.bgpStability) : undefined,
+    vifFailoverTests: s.vifFailoverTests ? new Map(s.vifFailoverTests) : undefined,
+    vifRoutes: s.vifRoutes ? new Map(s.vifRoutes) : undefined,
     vifUtilization: s.vifUtilization ? new Map(s.vifUtilization) : undefined,
     connectionUtilization: s.connectionUtilization ? new Map(s.connectionUtilization) : undefined,
     utilizationWindowDays: s.utilizationWindowDays,
@@ -182,10 +212,13 @@ export function validateSnapshot(parsed: unknown): SnapshotFile {
     throw new SnapshotValidationError('Snapshot is not a JSON object.');
   }
   const file = parsed as Record<string, unknown>;
-  if (file.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) {
+  // Older schemas are readable: every field added since v1 is optional, so an
+  // older file deserializes with the new keys absent. Rejecting them would
+  // break every snapshot a customer exported before the upgrade.
+  if (typeof file.schemaVersion !== 'number' || !SUPPORTED_SCHEMA_VERSIONS.includes(file.schemaVersion)) {
     throw new SnapshotValidationError(
       `Unsupported snapshot schema version: ${String(file.schemaVersion)}. ` +
-        `Expected ${SNAPSHOT_SCHEMA_VERSION}.`,
+        `Supported: ${SUPPORTED_SCHEMA_VERSIONS.join(', ')}.`,
     );
   }
   if (typeof file.exportedAt !== 'string') {

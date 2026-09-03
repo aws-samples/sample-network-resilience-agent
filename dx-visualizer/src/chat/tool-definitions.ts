@@ -73,6 +73,29 @@ export const TOOL_CONFIG: ToolConfiguration = {
     },
     {
       toolSpec: {
+        name: 'compare_dx_gateways',
+        description:
+          'Compare two Direct Connect Gateways against each other. Returns (1) whether they serve the same downstream TGW/VGW/VPC/Cloud WAN core network — which decides whether a difference is a redundancy gap or the intended design, (2) a diff of the allowedPrefixes each gateway may advertise back to on-premises, always available, and (3) a diff of the BGP prefixes each gateway accepts from the customer routers, when route data has been fetched. Use this whenever the user asks to compare, diff, or check redundancy between two named DX Gateways. Read the returned howToReport field before describing any difference.',
+        inputSchema: {
+          json: {
+            type: 'object',
+            properties: {
+              gateway_a: {
+                type: 'string',
+                description: 'First DX Gateway, by name or by ID. Names are matched case-insensitively, and a unique partial match is accepted.',
+              },
+              gateway_b: {
+                type: 'string',
+                description: 'Second DX Gateway, by name or by ID.',
+              },
+            },
+            required: ['gateway_a', 'gateway_b'],
+          },
+        },
+      },
+    },
+    {
+      toolSpec: {
         name: 'estimate_upgrade_cost',
         description:
           'Estimate what additional connections and locations are needed, plus the cost, to upgrade to a target resiliency level.',

@@ -6,7 +6,28 @@ import { resolveAccountName } from '../api/organizations';
 import { buildGraph } from '../engine/topology-builder';
 import { applyLayout } from '../engine/layout-engine';
 import { analyzeTopology, getRecommendedGraph } from '../engine/recommendation-engine';
-import type { DxNode } from '../types/topology';
+import type { DxNode, TopologyData } from '../types/topology';
+
+/**
+ * Topology with every Site-to-Site VPN removed, for the "hide VPN" filter.
+ *
+ * Clearing `vpnConnections` is enough to erase VPN from the graph entirely:
+ * `addVpnSubgraph` — the sole producer of `vpn-*`, `onprem-vpn-*` and
+ * `custsite-vpn-*` nodes and of the tunnel edges — is only ever reached by
+ * iterating this array, and `customerGateways` is read nowhere else in
+ * `buildGraph`, so the CGW routers vanish with it.
+ *
+ * Stripping before the build rather than filtering after it also fixes two
+ * things for free. The layout engine reserves a band above the DX rows sized
+ * to the VPN section and widens the `cgw` column to hold it; with no VPN nodes
+ * present the band collapses and the column drops to zero width. And
+ * `isTgwIsolated` / `isVgwIsolated` now count a VPN-only gateway as isolated,
+ * so it moves into the Unattached zone instead of floating on the canvas with
+ * every edge filtered out from under it.
+ */
+function withoutVpn(topology: TopologyData): TopologyData {
+  return { ...topology, vpnConnections: [] };
+}
 
 function rebuildFromTopology() {
   const {
@@ -17,6 +38,7 @@ function rebuildFromTopology() {
     expandedIsolatedTgwGroups,
     isolatedTgwGroupViewMode,
     showNonDxVpcs,
+    showVpn,
     expandedPartnerGroups,
     resiliencyTargets,
     focusedDxGatewayId,
@@ -31,7 +53,7 @@ function rebuildFromTopology() {
   if (!topologyData) return;
 
   const { nodes, edges } = buildGraph(
-    topologyData,
+    showVpn ? topologyData : withoutVpn(topologyData),
     expandedVpcGroups,
     expandedTgwGroups,
     vpcGroupViewMode,
@@ -40,6 +62,11 @@ function rebuildFromTopology() {
     showNonDxVpcs,
     expandedPartnerGroups,
   );
+  // Always the FULL topology, never the VPN-stripped copy above. Hiding VPN is
+  // a canvas filter, not a change of scope: `bp-no-vpn-backup` warns when no
+  // VPN exists, and `vpn-tunnel-redundancy` / `vpn-static-routes-only` /
+  // `vpn-dpd` report real faults, so grading the stripped copy would both
+  // invent a finding and silence four others.
   const assessment = analyzeTopology(topologyData, resiliencyTargets);
 
   const nodesWithBadges = nodes.map((node) => {
@@ -107,6 +134,9 @@ export function useTopology() {
   const expandedIsolatedTgwGroups = useTopologyStore((s) => s.expandedIsolatedTgwGroups);
   const isolatedTgwGroupViewMode = useTopologyStore((s) => s.isolatedTgwGroupViewMode);
   const showNonDxVpcs = useTopologyStore((s) => s.showNonDxVpcs);
+  // Hiding VPN changes which nodes buildGraph emits, so it has to rebuild the
+  // graph — it can't be a render-time filter like showVpcs.
+  const showVpn = useTopologyStore((s) => s.showVpn);
   const expandedPartnerGroups = useTopologyStore((s) => s.expandedPartnerGroups);
   const resiliencyTargets = useTopologyStore((s) => s.resiliencyTargets);
   const focusedDxGatewayId = useTopologyStore((s) => s.focusedDxGatewayId);
@@ -139,7 +169,7 @@ export function useTopology() {
     const fetchId = ++fetchIdRef.current;
     const isLatest = () => fetchIdRef.current === fetchId;
 
-    const { credentials, useMock, mockScenario, clearUserEdges, clearHiddenEdges, clearEdgeReconnectOverrides, clearUserCustomerSites, clearHiddenCustomerSites, resetUtilization } = useTopologyStore.getState();
+    const { credentials, useMock, mockScenario, clearUserEdges, clearHiddenEdges, clearEdgeReconnectOverrides, clearUserCustomerSites, clearHiddenCustomerSites, resetUtilization, resetVifRoutes } = useTopologyStore.getState();
 
     // Refresh wipes user-drawn, hidden, and rewired edges plus user-added
     // and user-hidden Customer Data Center zones — node IDs may change after
@@ -153,6 +183,11 @@ export function useTopology() {
     // Utilization is per-topology — a refetch invalidates the cache so users
     // don't see stale CloudWatch data after switching scenarios or accounts.
     resetUtilization();
+    // BGP routes are per-topology for the same reason, and more sharply so: the
+    // cache is keyed by VIF id, so surviving a scenario switch or an account
+    // change would stamp one topology's prefixes onto another's VIFs and compute
+    // a confidently wrong failover-gap count from them.
+    resetVifRoutes();
 
     setIsLoading(true);
     setError(null);
@@ -187,6 +222,13 @@ export function useTopology() {
       }
       rebuildFromTopology();
       useTopologyStore.getState().bumpTopologyRefresh();
+      // Live mode owns the BGP route data, so a refresh taken while live is on
+      // refetches it rather than waiting for a click — otherwise the route cache
+      // we just cleared would leave the DX Gateway gap counts blank until someone
+      // opened a panel.
+      if (useTopologyStore.getState().showLiveStatus) {
+        void useTopologyStore.getState().ensureVifRoutes();
+      }
     } catch (err) {
       if (!isLatest()) return;
       setError(err instanceof Error ? err.message : 'Failed to load topology');
@@ -205,7 +247,7 @@ export function useTopology() {
     if (topologyData) {
       rebuildFromTopology();
     }
-  }, [topologyData, expandedVpcGroups, expandedTgwGroups, vpcGroupViewMode, expandedIsolatedTgwGroups, isolatedTgwGroupViewMode, showNonDxVpcs, expandedPartnerGroups, resiliencyTargets, focusedDxGatewayId, expandedUnattachedZone, expandedHiddenAssocZone, showUtilization]);
+  }, [topologyData, expandedVpcGroups, expandedTgwGroups, vpcGroupViewMode, expandedIsolatedTgwGroups, isolatedTgwGroupViewMode, showNonDxVpcs, showVpn, expandedPartnerGroups, resiliencyTargets, focusedDxGatewayId, expandedUnattachedZone, expandedHiddenAssocZone, showUtilization]);
 
 
   return { loadTopology };

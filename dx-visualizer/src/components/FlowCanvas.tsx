@@ -41,6 +41,7 @@ import { HiddenAssocZoneNode } from './nodes/HiddenAssocZoneNode';
 import { AwsCloudNode } from './nodes/AwsCloudNode';
 import { PublicResourcesNode } from './nodes/PublicResourcesNode';
 import { CustomEdge } from '../edges/CustomEdge';
+import { LayersPanel } from './LayersPanel';
 
 const nodeTypes = {
   customerSite: CustomerSiteNode,
@@ -992,7 +993,12 @@ export function FlowCanvas() {
           nodeColor={miniMapNodeColor}
           maskColor={light ? 'rgba(226, 229, 235, 0.8)' : 'rgba(15, 23, 42, 0.8)'}
         />
+        {/* Legend and Layers share ONE top-right Panel. Two Panels with the
+            same `position` would both be absolutely positioned at the corner
+            and overlap; stacking them in a flex column here is what puts
+            Layers under the Legend. */}
         <Panel position="top-right">
+          <div className="flex flex-col items-end gap-2">
           <div className={`rounded-lg text-[10px] font-tech ${
             light
               ? 'bg-gray-100/90 border border-gray-300 text-gray-600 shadow-sm'
@@ -1054,6 +1060,8 @@ export function FlowCanvas() {
                 )}
               </div>
             )}
+          </div>
+          <LayersPanel />
           </div>
         </Panel>
       </ReactFlow>

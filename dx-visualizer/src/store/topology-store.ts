@@ -2,10 +2,17 @@ import { create } from 'zustand';
 import type { DxNode, DxEdge, TopologyData, ViewMode } from '../types/topology';
 import type { CombinedAssessment } from '../types/recommendations';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
-import type { AwsCredentials } from '../types/aws-resources';
+import type { AwsCredentials, VifRoutes, VifFailoverTest } from '../types/aws-resources';
 import { WELCOME_MESSAGE, type MockScenario } from '../utils/shared';
 import { config } from '../utils/config';
 import { fetchUtilization } from '../api/cloudwatch-utilization';
+import {
+  fetchBgpSessionStability,
+  type BgpSessionStability,
+  type BgpStabilityWindowDays,
+} from '../api/cloudwatch-dx';
+import { fetchVifRoutes } from '../api/dx-routes';
+import { fetchVifFailoverTests } from '../api/dx-tests';
 import { deserializeTopologyData, type SnapshotFile } from '../utils/snapshot';
 import { normalizeUserEdges } from '../utils/user-edges';
 
@@ -130,6 +137,22 @@ interface TopologyStore {
   showVpcs: boolean;
   setShowVpcs: (show: boolean) => void;
 
+  // Site-to-Site VPN visibility. Unlike the overlay toggles this one changes
+  // the *graph*, not just what's painted: `rebuildFromTopology` hands
+  // `buildGraph` a VPN-stripped copy of the topology so no `vpn-*` /
+  // `onprem-vpn-*` / `custsite-vpn-*` node is ever created. That matters
+  // because the layout engine reserves a whole horizontal band above the DX
+  // rows for the VPN section and widens the `cgw` column to fit it — hiding
+  // the nodes at render time would leave that band as empty space, which is
+  // the clutter the filter is meant to remove.
+  //
+  // The assessment deliberately still sees the FULL topology: six best
+  // practice rules read VPN data, and `bp-no-vpn-backup` is *credit* for
+  // having a VPN, so feeding it the stripped copy would invent a
+  // "No Site-to-Site VPN Backup" warning for an account that has one.
+  showVpn: boolean;
+  setShowVpn: (show: boolean) => void;
+
   // Unattached resources zone (orphan VPCs + isolated TGWs) lives inside
   // AWS Cloud and is collapsed by default so the canvas loads focused on
   // DX-connected topology. Users expand it to inspect the stranded
@@ -175,6 +198,67 @@ interface TopologyStore {
   utilizationCache: Map<30 | 60 | 90, { vif: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>; connection: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }> }>;
   loadUtilization: (windowDays: 30 | 60 | 90) => Promise<void>;
   resetUtilization: () => void;
+
+  // BGP routes — the actual prefixes on each VIF, from
+  // ListVirtualInterfaceRoutes. Two paginated DX calls per VIF, and they load
+  // with live mode (there is no separate overlay toggle), cached for the lifetime
+  // of a topology. A `null` cache means "never fetched" (distinct from "fetched
+  // and found nothing").
+  vifRoutesLoading: boolean;
+  vifRoutesError: string | null;
+  vifRoutesCache: Map<string, VifRoutes> | null;
+  loadVifRoutes: () => Promise<void>;
+  // Idempotent, no-retry wrapper for the automatic paths (entering live mode, or
+  // loading a topology with live already on) — see the implementation for why an
+  // earlier failure must not be retried on every toggle.
+  ensureVifRoutes: () => Promise<void>;
+  resetVifRoutes: () => void;
+  // Which VIFs currently have their route panel open, keyed by virtualInterfaceId.
+  expandedVifRoutePanels: Set<string>;
+  toggleVifRoutePanel: (vifId: string) => void;
+  // Which DX Gateways have their cross-VIF route-comparison panel open, keyed by
+  // directConnectGatewayId. Reads the same vifRoutesCache — a separate open set
+  // because the two panels answer different questions about the same data and an
+  // operator will want a VIF's full route list open beside the comparison.
+  expandedDxgwRouteDiffPanels: Set<string>;
+  toggleDxgwRouteDiffPanel: (dxGatewayId: string) => void;
+  // VIFs selected in the route-diff panel's tab bar. Held in the store rather
+  // than in panel state for one reason: the canvas has to draw them. A VIF is an
+  // EDGE, so the panel cannot reach it — CustomEdge matches its own `vifId`
+  // against this set and lights up. Keyed by vifId, not edge id, because
+  // aggregated edges carry a synthetic id ("3-vifs") that no VIF-level caller
+  // knows. One selected VIF only filters the panel's rows; two or more narrow the
+  // comparison itself. Either way every selected VIF is lit.
+  routeDiffPickedVifIds: Set<string>;
+  setRouteDiffPickedVifIds: (vifIds: Iterable<string>) => void;
+  // Derived from `routeDiffPickedVifIds`: the picked VIF edges plus their upstream
+  // path back to the on-premises router, so the highlight shows which physical
+  // connection each VIF rides on. Kept as precomputed sets because the
+  // alternative — every edge and node walking the graph in its own selector —
+  // is a traversal per element per render.
+  routeDiffPickedEdgeIds: Set<string>;
+  routeDiffPickedNodeIds: Set<string>;
+
+  // BGP History is a sub-mode of Live, not a per-edge button: it answers a
+  // whole-topology question ("which sessions are unstable / untested"), so
+  // turning it on annotates every VIF edge at once from one fetch.
+  showBgpHistory: boolean;
+  setShowBgpHistory: (show: boolean) => void;
+
+  // BGP session stability (flap history) from the AWS/DX VirtualInterfaceBgpStatus
+  // metric. Billed per metric retrieved, so this is on-demand only — same
+  // null-means-never-fetched convention as vifRoutesCache.
+  bgpStabilityLoading: boolean;
+  bgpStabilityError: string | null;
+  bgpStabilityCache: Map<string, BgpSessionStability> | null;
+  loadBgpStability: (windowDays?: BgpStabilityWindowDays) => Promise<void>;
+
+  // Recorded BGP failover tests (ListVirtualInterfaceTestHistory). One paginated
+  // DX call per VIF, so on-demand only. Same null-means-never-fetched convention.
+  vifFailoverTestsLoading: boolean;
+  vifFailoverTestsError: string | null;
+  vifFailoverTestsCache: Map<string, VifFailoverTest[]> | null;
+  loadVifFailoverTests: () => Promise<void>;
 
   // Edge label drag offsets
   edgeLabelOffsets: Map<string, { dx: number; dy: number }>;
@@ -567,6 +651,92 @@ function computePath(
   return { nodes, edges };
 }
 
+/**
+ * Everything on the *upstream* path of the VIFs picked in a DXGW route-diff
+ * panel: the VIF edge itself, then every edge and node back toward the customer
+ * router — the DX connection, the partner device, the location, the on-premises
+ * router. Lighting only the VIF edge answers "which VIF?" but not "over which
+ * connection?", and the second question is the one that decides whether two
+ * VIFs in the comparison are actually independent or share a single port.
+ *
+ * Downstream is deliberately excluded. Every VIF on one gateway shares its
+ * DXGW → TGW/VGW → VPC tail by construction, so lighting it adds no information
+ * and dilutes the part of the trail that does discriminate.
+ *
+ * Matching is by vifId (including any `aggregatedVifs` member on a bundled
+ * edge), never by edge id — a bundled edge's id is synthetic ("3-vifs").
+ *
+ * The last mile needs a non-edge hop. There is no built-in `onprem-{loc}` →
+ * `partner-{conn}` edge — that cross-connect is customer cabling AWS can't see,
+ * so it only exists if the user drew it (in `userEdges`, which this traversal
+ * does follow). Without a fallback the trail would stop at the partner device on
+ * every un-annotated topology, i.e. exactly the case where the reader most needs
+ * to know which customer router the VIF lands on. So each node reached upstream
+ * also pulls in the on-prem node for its `locationCode`, matched by id suffix the
+ * same way containers match their children.
+ */
+function computeRouteDiffPath(
+  pickedVifIds: ReadonlySet<string>,
+  state: { viewMode: ViewMode; currentNodes: DxNode[]; currentEdges: DxEdge[]; recommendedEdges: DxEdge[]; userEdges: DxEdge[] },
+): { nodes: Set<string>; edges: Set<string> } {
+  const nodes = new Set<string>();
+  const edges = new Set<string>();
+  if (pickedVifIds.size === 0) return { nodes, edges };
+
+  const allEdges = state.viewMode === 'recommended'
+    ? [...state.currentEdges, ...state.recommendedEdges, ...state.userEdges]
+    : [...state.currentEdges, ...state.userEdges];
+
+  const seeds = new Set<string>();
+  for (const e of allEdges) {
+    const vifId = e.data?.vifId;
+    const carriesPick = (vifId != null && pickedVifIds.has(vifId))
+      || (e.data?.aggregatedVifs?.some((av) => pickedVifIds.has(av.vifId)) ?? false);
+    if (!carriesPick) continue;
+    edges.add(e.id);
+    nodes.add(e.source);
+    nodes.add(e.target);
+    seeds.add(e.source);
+  }
+  if (seeds.size === 0) return { nodes, edges };
+
+  const { incoming } = getAdjMaps(state.viewMode, state.currentEdges, state.recommendedEdges, state.userEdges);
+  const queue = [...seeds];
+  const visited = new Set(seeds);
+  while (queue.length > 0) {
+    const n = queue.shift()!;
+    for (const { edgeId, source } of incoming.get(n) ?? []) {
+      edges.add(edgeId);
+      nodes.add(source);
+      if (!visited.has(source)) {
+        visited.add(source);
+        queue.push(source);
+      }
+    }
+  }
+
+  // Last-mile hop: the customer router at each DX location the trail touches.
+  // Only real (non-ghost) on-prem nodes, since a picked VIF is by definition
+  // existing infrastructure.
+  const onPremByLocation = new Map<string, string>();
+  const locationByNodeId = new Map<string, string>();
+  for (const n of state.currentNodes) {
+    // `onprem-vpn-{cgwId}` also matches this prefix; its "location" never equals
+    // a real locationCode, so it simply never gets pulled in.
+    if (n.data?.category === 'onPremise' && n.id.startsWith('onprem-')) {
+      onPremByLocation.set(n.id.slice('onprem-'.length), n.id);
+    }
+    const loc = n.data?.details?.locationCode;
+    if (loc) locationByNodeId.set(n.id, loc);
+  }
+  for (const id of [...nodes]) {
+    const loc = locationByNodeId.get(id);
+    const onPremId = loc != null ? onPremByLocation.get(loc) : undefined;
+    if (onPremId) nodes.add(onPremId);
+  }
+  return { nodes, edges };
+}
+
 export const useTopologyStore = create<TopologyStore>((set, get) => ({
   credentials: null,
   setCredentials: (creds) => set({ credentials: creds, useMock: !creds, homeAccountName: null }),
@@ -587,6 +757,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
     get().clearUserCustomerSites();
     get().clearHiddenCustomerSites();
     get().resetUtilization();
+    get().resetVifRoutes();
     set({
       topologyData: null,
       currentNodes: [],
@@ -623,14 +794,26 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   setCurrentGraph: (nodes, edges) =>
     set((state) => {
       const base = { currentNodes: nodes, currentEdges: edges };
-      // If the user has a pinned path, the adjacency graph just changed under
-      // it (e.g. expanding a collapsed group surfaces new child nodes/edges).
-      // Recompute the BFS so the freshly-revealed children inherit the path
-      // highlight instead of appearing dimmed.
+      // Both derived paths are keyed by edge/node id, so a graph rebuild strands
+      // them on ids that no longer exist. Recompute rather than clear: the pick
+      // and the pin are both still meaningful, it's only the resolved ids that
+      // went stale (e.g. expanding a collapsed group surfaces new children, or
+      // bundling collapses several VIF edges into one synthetic id).
+      const next = { ...state, ...base };
+      const routeDiff = state.routeDiffPickedVifIds.size > 0
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        : null;
       if (state.pinnedNodeId != null) {
-        const next = { ...state, ...base };
         const path = computePath(state.pinnedNodeId, next);
-        return { ...base, highlightedNodeIds: path.nodes, highlightedEdgeIds: path.edges };
+        return {
+          ...base,
+          highlightedNodeIds: path.nodes,
+          highlightedEdgeIds: path.edges,
+          ...(routeDiff ? { routeDiffPickedEdgeIds: routeDiff.edges, routeDiffPickedNodeIds: routeDiff.nodes } : {}),
+        };
+      }
+      if (routeDiff) {
+        return { ...base, routeDiffPickedEdgeIds: routeDiff.edges, routeDiffPickedNodeIds: routeDiff.nodes };
       }
       return base;
     }),
@@ -645,20 +828,43 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
         recommendedEdges: edges,
         recommendedCurrentNodes: currentForRec ?? [],
       };
+      const next = { ...state, ...base };
+      const routeDiff = state.routeDiffPickedVifIds.size > 0
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        : null;
       if (state.pinnedNodeId != null) {
-        const next = { ...state, ...base };
         const path = computePath(state.pinnedNodeId, next);
-        return { ...base, highlightedNodeIds: path.nodes, highlightedEdgeIds: path.edges };
+        return {
+          ...base,
+          highlightedNodeIds: path.nodes,
+          highlightedEdgeIds: path.edges,
+          ...(routeDiff ? { routeDiffPickedEdgeIds: routeDiff.edges, routeDiffPickedNodeIds: routeDiff.nodes } : {}),
+        };
+      }
+      if (routeDiff) {
+        return { ...base, routeDiffPickedEdgeIds: routeDiff.edges, routeDiffPickedNodeIds: routeDiff.nodes };
       }
       return base;
     }),
 
   viewMode: 'current',
   setViewMode: (mode) =>
-    set((state) => ({
-      viewMode: mode,
-      focusedDxGatewayId: mode === 'current' ? null : state.focusedDxGatewayId,
-    })),
+    set((state) => {
+      // The route-diff trail is a set of node/edge ids, and which edge list is
+      // live depends on the view mode — the Recommended view adds ghost edges
+      // and re-lays out the current ones. Recompute so the highlight follows
+      // the graph the user is now looking at instead of pointing at ids that
+      // aren't rendered.
+      const next = { ...state, viewMode: mode };
+      const routeDiff = state.routeDiffPickedVifIds.size > 0
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        : null;
+      return {
+        viewMode: mode,
+        focusedDxGatewayId: mode === 'current' ? null : state.focusedDxGatewayId,
+        ...(routeDiff ? { routeDiffPickedEdgeIds: routeDiff.edges, routeDiffPickedNodeIds: routeDiff.nodes } : {}),
+      };
+    }),
 
   assessment: null,
   setAssessment: (assessment) => set({ assessment }),
@@ -888,6 +1094,9 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   showVpcs: true,
   setShowVpcs: (show) => set({ showVpcs: show }),
 
+  showVpn: true,
+  setShowVpn: (show) => set({ showVpn: show }),
+
   expandedUnattachedZone: false,
   toggleUnattachedZone: () => set((state) => ({ expandedUnattachedZone: !state.expandedUnattachedZone })),
 
@@ -901,7 +1110,34 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   setCredentialsModalOpen: (open) => set({ credentialsModalOpen: open }),
 
   showLiveStatus: false,
-  toggleLiveStatus: () => set((state) => ({ showLiveStatus: !state.showLiveStatus })),
+  toggleLiveStatus: () => {
+    const next = !get().showLiveStatus;
+    if (!next) {
+      // The BGP route overlay lives inside the live layer, so leaving live mode
+      // closes any open route panels. The fetched routes stay cached — re-entering
+      // live costs nothing.
+      // Same for the BGP History sub-mode: it is a live-layer annotation, so it
+      // switches off with live. The fetched history stays cached.
+      set({
+        showLiveStatus: false,
+        expandedVifRoutePanels: new Set<string>(),
+        expandedDxgwRouteDiffPanels: new Set<string>(),
+        showBgpHistory: false,
+      });
+      return;
+    }
+    set({ showLiveStatus: true });
+    // Pull BGP routes as part of entering live mode. The DX Gateway's `⚠ N`
+    // failover-gap count is the headline finding in this data, and it cannot be
+    // computed without the routes — leaving the fetch on the Route diff click
+    // meant the warning only appeared once you already suspected it was there,
+    // which is backwards for a warning. The trade is real and deliberate: two
+    // paginated ListVirtualInterfaceRoutes calls per VIF now ride along with the
+    // toggle instead of an explicit click. They are read-only List calls with no
+    // per-request charge, they happen once per topology (the cache short-circuits
+    // every later call), and `ensureVifRoutes` never retries a failed attempt.
+    void get().ensureVifRoutes();
+  },
 
   redactMode: loadRedactMode(),
   toggleRedactMode: () => set((state) => {
@@ -1006,6 +1242,281 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       utilizationLoading: false,
       utilizationError: null,
     }),
+
+  vifRoutesLoading: false,
+  vifRoutesError: null,
+  vifRoutesCache: null,
+  loadVifRoutes: async () => {
+    const { credentials, useMock, topologyData, vifRoutesCache, importedSnapshot } = get();
+    if (!topologyData) return;
+    // Cache hit short-circuits everything — live fetches (avoid re-hitting the
+    // DX API), mock scenarios, and imported snapshots (cache rehydrated from
+    // the file). Must run before the credentials gate so imported mode can
+    // re-enable the overlay without an AWS round-trip.
+    if (vifRoutesCache) {
+      // Stamp onto a fresh topologyData object — a new object reference is what
+      // the graph rebuild useEffect watches.
+      const next: TopologyData = { ...topologyData, vifRoutes: vifRoutesCache };
+      set({
+        topologyData: next,
+        vifRoutesLoading: false,
+        vifRoutesError: null,
+      });
+      return;
+    }
+    // Mock topologies bake routes into the fixture, so there's nothing to fetch
+    // — but the cache still has to be seeded from them, because a non-null cache
+    // is what tells the edge buttons routes are ready to display.
+    if (useMock) {
+      set({
+        vifRoutesCache: topologyData.vifRoutes ?? null,
+        vifRoutesLoading: false,
+        vifRoutesError: topologyData.vifRoutes
+          ? null
+          : 'No BGP route data in this demo scenario',
+      });
+      return;
+    }
+    // Imported snapshot with no cached routes: the customer never fetched them
+    // before exporting, and the SA has no credentials to fetch them now. Name
+    // the gap instead of showing an opaque "Connect to AWS".
+    if (importedSnapshot) {
+      set({
+        vifRoutesError: 'No BGP route data in this snapshot',
+        vifRoutesLoading: false,
+      });
+      return;
+    }
+    if (!credentials) {
+      set({ vifRoutesError: 'Connect to AWS to fetch BGP routes', vifRoutesLoading: false });
+      return;
+    }
+    set({ vifRoutesLoading: true, vifRoutesError: null });
+    try {
+      const routes = await fetchVifRoutes(credentials, topologyData.virtualInterfaces);
+      const latestTopology = get().topologyData;
+      if (!latestTopology) return;
+      if (routes.size === 0) {
+        set({
+          vifRoutesLoading: false,
+          vifRoutesError: 'No BGP routes returned — check directconnect:ListVirtualInterfaceRoutes permission',
+        });
+        return;
+      }
+      const next: TopologyData = { ...latestTopology, vifRoutes: routes };
+      set({
+        topologyData: next,
+        vifRoutesCache: routes,
+        vifRoutesLoading: false,
+        vifRoutesError: null,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ vifRoutesLoading: false, vifRoutesError: msg });
+    }
+  },
+  ensureVifRoutes: async () => {
+    const { topologyData, vifRoutesLoading, vifRoutesCache, vifRoutesError } = get();
+    if (!topologyData || vifRoutesLoading) return;
+    // Already stamped onto this topology: loadVifRoutes would only replace
+    // topologyData with an equivalent object and force a graph rebuild.
+    if (vifRoutesCache && topologyData.vifRoutes === vifRoutesCache) return;
+    // An attempt already failed — no directconnect:ListVirtualInterfaceRoutes
+    // permission, no routes returned, or a demo scenario with none baked in. This
+    // path runs on every live toggle, so retrying would turn a missing permission
+    // into a stream of AccessDenied calls. The explicit Routes / Route diff click
+    // still calls loadVifRoutes directly, so a retry stays one click away.
+    if (!vifRoutesCache && vifRoutesError) return;
+    await get().loadVifRoutes();
+  },
+  resetVifRoutes: () =>
+    set({
+      vifRoutesCache: null,
+      vifRoutesLoading: false,
+      vifRoutesError: null,
+      expandedVifRoutePanels: new Set(),
+      expandedDxgwRouteDiffPanels: new Set(),
+      routeDiffPickedVifIds: new Set(),
+      routeDiffPickedEdgeIds: new Set(),
+      routeDiffPickedNodeIds: new Set(),
+    }),
+  expandedVifRoutePanels: new Set(),
+  toggleVifRoutePanel: (vifId) =>
+    set((state) => {
+      const next = new Set(state.expandedVifRoutePanels);
+      if (next.has(vifId)) next.delete(vifId);
+      else next.add(vifId);
+      return { expandedVifRoutePanels: next };
+    }),
+  expandedDxgwRouteDiffPanels: new Set(),
+  toggleDxgwRouteDiffPanel: (dxGatewayId) =>
+    set((state) => {
+      const next = new Set(state.expandedDxgwRouteDiffPanels);
+      const closing = next.has(dxGatewayId);
+      if (closing) next.delete(dxGatewayId);
+      else next.add(dxGatewayId);
+      return {
+        expandedDxgwRouteDiffPanels: next,
+        // Closing the last panel drops the canvas highlight with it — leaving
+        // edges lit with no panel to explain them looks like a rendering bug.
+        ...(closing && next.size === 0
+          ? {
+              routeDiffPickedVifIds: new Set<string>(),
+              routeDiffPickedEdgeIds: new Set<string>(),
+              routeDiffPickedNodeIds: new Set<string>(),
+            }
+          : {}),
+      };
+    }),
+
+  routeDiffPickedVifIds: new Set(),
+  routeDiffPickedEdgeIds: new Set(),
+  routeDiffPickedNodeIds: new Set(),
+  setRouteDiffPickedVifIds: (vifIds) =>
+    set((state) => {
+      const next = new Set(vifIds);
+      if (
+        next.size === state.routeDiffPickedVifIds.size
+        && [...next].every((id) => state.routeDiffPickedVifIds.has(id))
+      ) {
+        // Same set — return nothing so every edge doesn't re-render on a no-op.
+        return {};
+      }
+      const path = computeRouteDiffPath(next, state);
+      return {
+        routeDiffPickedVifIds: next,
+        routeDiffPickedEdgeIds: path.edges,
+        routeDiffPickedNodeIds: path.nodes,
+      };
+    }),
+
+  showBgpHistory: false,
+  setShowBgpHistory: (show) => set({ showBgpHistory: show }),
+  bgpStabilityLoading: false,
+  bgpStabilityError: null,
+  bgpStabilityCache: null,
+  loadBgpStability: async (windowDays = 7) => {
+    const { credentials, useMock, topologyData, bgpStabilityCache, importedSnapshot } = get();
+    if (!topologyData) return;
+    // Cache hit first, so re-opening the panel never re-bills GetMetricData and
+    // imported snapshots work without credentials.
+    if (bgpStabilityCache) {
+      const next: TopologyData = { ...topologyData, bgpStability: bgpStabilityCache };
+      set({ topologyData: next, bgpStabilityLoading: false, bgpStabilityError: null });
+      return;
+    }
+    if (useMock) {
+      set({
+        bgpStabilityCache: topologyData.bgpStability ?? null,
+        bgpStabilityLoading: false,
+        bgpStabilityError: topologyData.bgpStability
+          ? null
+          : 'No BGP stability data in this demo scenario',
+      });
+      return;
+    }
+    if (importedSnapshot) {
+      set({
+        bgpStabilityError: 'No BGP stability data in this snapshot',
+        bgpStabilityLoading: false,
+      });
+      return;
+    }
+    if (!credentials) {
+      set({ bgpStabilityError: 'Connect to AWS to fetch BGP history', bgpStabilityLoading: false });
+      return;
+    }
+    set({ bgpStabilityLoading: true, bgpStabilityError: null });
+    try {
+      const stability = await fetchBgpSessionStability(
+        credentials,
+        topologyData.virtualInterfaces,
+        windowDays,
+      );
+      const latestTopology = get().topologyData;
+      if (!latestTopology) return;
+      if (stability.size === 0) {
+        set({
+          bgpStabilityLoading: false,
+          bgpStabilityError: 'No BGP session history returned — check cloudwatch:GetMetricData permission',
+        });
+        return;
+      }
+      const next: TopologyData = { ...latestTopology, bgpStability: stability };
+      set({
+        topologyData: next,
+        bgpStabilityCache: stability,
+        bgpStabilityLoading: false,
+        bgpStabilityError: null,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ bgpStabilityLoading: false, bgpStabilityError: msg });
+    }
+  },
+
+  vifFailoverTestsLoading: false,
+  vifFailoverTestsError: null,
+  vifFailoverTestsCache: null,
+  loadVifFailoverTests: async () => {
+    const { credentials, useMock, topologyData, vifFailoverTestsCache, importedSnapshot } = get();
+    if (!topologyData) return;
+    if (vifFailoverTestsCache) {
+      const next: TopologyData = { ...topologyData, vifFailoverTests: vifFailoverTestsCache };
+      set({ topologyData: next, vifFailoverTestsLoading: false, vifFailoverTestsError: null });
+      return;
+    }
+    if (useMock) {
+      set({
+        vifFailoverTestsCache: topologyData.vifFailoverTests ?? null,
+        vifFailoverTestsLoading: false,
+        vifFailoverTestsError: topologyData.vifFailoverTests
+          ? null
+          : 'No failover test history in this demo scenario',
+      });
+      return;
+    }
+    if (importedSnapshot) {
+      set({
+        vifFailoverTestsError: 'No failover test history in this snapshot',
+        vifFailoverTestsLoading: false,
+      });
+      return;
+    }
+    if (!credentials) {
+      set({
+        vifFailoverTestsError: 'Connect to AWS to fetch failover test history',
+        vifFailoverTestsLoading: false,
+      });
+      return;
+    }
+    set({ vifFailoverTestsLoading: true, vifFailoverTestsError: null });
+    try {
+      const tests = await fetchVifFailoverTests(credentials, topologyData.virtualInterfaces);
+      const latestTopology = get().topologyData;
+      if (!latestTopology) return;
+      // An empty map means every VIF query failed — surface the likely cause.
+      // A map of empty arrays is a real answer and must NOT error.
+      if (tests.size === 0) {
+        set({
+          vifFailoverTestsLoading: false,
+          vifFailoverTestsError:
+            'No test history returned — check directconnect:ListVirtualInterfaceTestHistory permission',
+        });
+        return;
+      }
+      const next: TopologyData = { ...latestTopology, vifFailoverTests: tests };
+      set({
+        topologyData: next,
+        vifFailoverTestsCache: tests,
+        vifFailoverTestsLoading: false,
+        vifFailoverTestsError: null,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ vifFailoverTestsLoading: false, vifFailoverTestsError: msg });
+    }
+  },
 
   edgeLabelOffsets: new Map(),
   setEdgeLabelOffset: (edgeId, dx, dy) =>
@@ -1529,6 +2040,16 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       viewMode: view.viewMode,
       showLiveStatus: view.showLiveStatus,
       showUtilization: view.showUtilization,
+      // Rehydrate the routes cache from the file so the SA can open route panels
+      // without hitting AWS (which would fail — no credentials). A non-null
+      // cache is also what makes the edge Routes buttons act as pure cache reads.
+      vifRoutesCache: topology.vifRoutes ?? null,
+      vifRoutesError: null,
+      expandedVifRoutePanels: new Set(),
+      expandedDxgwRouteDiffPanels: new Set(),
+      routeDiffPickedVifIds: new Set(),
+      routeDiffPickedEdgeIds: new Set(),
+      routeDiffPickedNodeIds: new Set(),
       utilizationWindowDays: view.utilizationWindowDays,
       focusedDxGatewayId: view.focusedDxGatewayId,
       resiliencyTargets: { ...view.resiliencyTargets },
@@ -1544,6 +2065,9 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       vpcGroupViewMode: new Map(view.vpcGroupViewMode ?? []),
       isolatedTgwGroupViewMode: new Map(view.isolatedTgwGroupViewMode ?? []),
       showVpcs: view.showVpcs,
+      // Absent in snapshots written before the VPN filter existed — those were
+      // all exported with VPN visible, so default to showing it.
+      showVpn: view.showVpn ?? true,
       showNonDxVpcs: new Set(view.showNonDxVpcs ?? []),
       expandedUnattachedZone: view.expandedUnattachedZone,
       expandedHiddenAssocZone: view.expandedHiddenAssocZone,

@@ -42,11 +42,13 @@ Rules related to BGP/BFD settings, connection state, and protocol tuning.
 | `vif-down` | VIF or all BGP peers in down state | Detected | `DescribeVirtualInterfaces` — `virtualInterfaceState` + `bgpPeers[].bgpStatus` |
 | `connection-not-available` | DX connection in non-`available` state | Detected | `DescribeConnections` — `connectionState` |
 | `vpn-tunnel-redundancy` | Both tunnels UP per S2S VPN | Detected | `DescribeVpnConnections` — `vgwTelemetry[].status` |
-| `bgp-route-limit` | ≤100 prefixes on-prem → AWS on private/transit VIFs | Detected | CloudWatch `AWS/DX` `VirtualInterfaceBgpPrefixesAccepted` (IPv4 + IPv6 summed). Falls back to guidance only when no metric stream is available (e.g. brand-new VIF) |
+| `bgp-route-limit` | ≤100 prefixes on-prem → AWS on private/transit VIFs | Detected | Exact accepted-route count from `ListVirtualInterfaceRoutes` when available, else CloudWatch `AWS/DX` `VirtualInterfaceBgpPrefixesAccepted` (IPv4 + IPv6 summed). Falls back to guidance only when neither source has data (e.g. brand-new VIF) |
+| `vif-rate-limit-oversubscription` | VIF rate limits sum above the parent port | Detected | `rateLimit` per VIF vs connection `bandwidth`; silent when no VIF is rate-limited |
 | `bfd-guidance` | Enable BFD on customer router for sub-second failover | Guidance | BFD runs on the CPE; no AWS-side visibility |
 | `bgp-timers-fallback` | Tune BGP hold timers when BFD unavailable | Guidance | BGP timers live on the CPE |
 | `vpn-dpd` | Configure Dead Peer Detection on CPE | Guidance | DPD timer is a CPE-side config; not in any AWS API |
-| `consistent-prefix-advertisement` | Same prefixes across redundant VIFs | Guidance | BGP RIB isn't exposed — verify on CPE |
+| `consistent-prefix-advertisement` | Same accepted prefixes across redundant VIFs | Detected with route data, else Guidance | Compares accepted prefix sets per DXGW/VGW from `ListVirtualInterfaceRoutes`. Needs `directconnect:ListVirtualInterfaceRoutes`; without it, guidance ("verify on CPE") |
+| `vif-route-symmetry` | Summarize prefixes; keep VIF routing symmetric | Detected with route data, else Guidance | Flags prefixes already covered by a less-specific prefix on the same VIF |
 
 ## Best practice rules — Operations
 
@@ -59,8 +61,9 @@ Rules related to monitoring, testing, and runbook maintenance.
 
 ## Summary
 
-- **Detected (actionable from AWS data):** 13 rules — 5 resiliency + `vif-down`, `connection-not-available`, `vpn-tunnel-redundancy`, `no-vpn-backup`, `cgw-redundancy`, `dx-partner-diversity`, `cross-region-path`, `bgp-route-limit`.
-- **Guidance (always informational):** 11 rules — the BFD / DPD / BGP-timer / prefix-consistency CPE-side configs, SLA preconditions (Enterprise Support, WA Review), and operational process recommendations (runbooks, failover testing, toolkit, SLA awareness, DX location strategy).
+- **Detected (actionable from AWS data):** 14 rules — 5 resiliency + `vif-down`, `connection-not-available`, `vpn-tunnel-redundancy`, `no-vpn-backup`, `cgw-redundancy`, `dx-partner-diversity`, `cross-region-path`, `bgp-route-limit`, `vif-rate-limit-oversubscription`.
+- **Detected only with BGP route data:** 2 rules — `consistent-prefix-advertisement` and `vif-route-symmetry`, which degrade to guidance without it. Both require `directconnect:ListVirtualInterfaceRoutes`, which is **not** covered by `directconnect:Describe*`.
+- **Guidance (always informational):** 10 rules — the BFD / DPD / BGP-timer CPE-side configs, SLA preconditions (Enterprise Support, WA Review), and operational process recommendations (runbooks, failover testing, toolkit, SLA awareness, DX location strategy).
 
 ## Why guidance rules stay guidance
 

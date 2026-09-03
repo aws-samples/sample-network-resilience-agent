@@ -82,11 +82,42 @@ describe('serializeTopologyData / deserializeTopologyData', () => {
     delete td.vifUtilization;
     delete td.connectionUtilization;
     delete td.regionNames;
+    delete td.vifRoutes;
     const back = deserializeTopologyData(JSON.parse(JSON.stringify(serializeTopologyData(td))));
     expect(back.bgpPrefixMetrics).toBeUndefined();
     expect(back.vifUtilization).toBeUndefined();
     expect(back.connectionUtilization).toBeUndefined();
     expect(back.regionNames).toBeUndefined();
+    expect(back.vifRoutes).toBeUndefined();
+  });
+
+  it('round-trips vifRoutes through JSON without losing route detail', () => {
+    const td = makeTopology();
+    td.vifRoutes = new Map([
+      ['dxvif-aaaa1111', {
+        accepted: [{
+          cidr: '10.20.0.0/24',
+          addressFamily: 'ipv4' as const,
+          asPath: [{ pathType: 'seq' as const, path: [65000, 65001] }],
+          communities: ['7224:8100'],
+          routeDirection: 'accepted' as const,
+          // ISO string, not a Date — a Date would survive JSON.stringify only as
+          // a string and break the declared type on the way back in.
+          routeInstalledAt: '2026-08-01T09:15:00.000Z',
+          awsLogicalDeviceId: 'EqDC2-abcdefgh',
+        }],
+        advertised: [{
+          cidr: '10.0.0.0/16',
+          addressFamily: 'ipv4' as const,
+          asPath: [{ pathType: 'set' as const, path: [64512] }],
+          communities: [],
+          routeDirection: 'advertised' as const,
+        }],
+      }],
+    ]);
+    const back = deserializeTopologyData(JSON.parse(JSON.stringify(serializeTopologyData(td))));
+    expect(back.vifRoutes).toBeInstanceOf(Map);
+    expect(back.vifRoutes).toEqual(td.vifRoutes);
   });
 });
 
@@ -144,6 +175,22 @@ describe('validateSnapshot', () => {
   it('rejects unsupported schema versions', () => {
     const file = validFile() as unknown as Record<string, unknown>;
     file.schemaVersion = 999;
+    expect(() => validateSnapshot(file)).toThrow(/Unsupported snapshot schema version/);
+  });
+
+  it('still accepts v1 snapshots exported before BGP route visibility', () => {
+    // Every field added since v1 is optional, so older files must keep importing —
+    // rejecting them would break every snapshot a customer already exported.
+    const file = validFile() as unknown as Record<string, unknown>;
+    file.schemaVersion = 1;
+    delete (file.view as Record<string, unknown>).showVifRoutes;
+    delete (file.topology as Record<string, unknown>).vifRoutes;
+    expect(() => validateSnapshot(file)).not.toThrow();
+  });
+
+  it('rejects a non-numeric schema version', () => {
+    const file = validFile() as unknown as Record<string, unknown>;
+    file.schemaVersion = '2';
     expect(() => validateSnapshot(file)).toThrow(/Unsupported snapshot schema version/);
   });
 

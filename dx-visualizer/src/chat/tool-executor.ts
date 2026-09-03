@@ -3,6 +3,8 @@ import { lookupDxPricing, lookupNetworkServicePricing } from './dx-pricing';
 import { fetchDxCosts, fetchDxDailyCosts } from '../api/cost-explorer';
 import { RESILIENCY_TIERS, type MockScenario } from '../utils/shared';
 import { getLocationDeviceCounts } from '../engine/sla-gating';
+import { compareDxGateways } from '../engine/dxgw-compare';
+import type { TopologyData } from '../types/topology';
 
 export interface ToolResult {
   content: Array<{ text: string }>;
@@ -18,6 +20,8 @@ export async function executeTool(toolName: string, input: Record<string, unknow
         return await handleGetNetworkServicePricing(input);
       case 'get_topology_summary':
         return handleGetTopologySummary();
+      case 'compare_dx_gateways':
+        return handleCompareDxGateways(input);
       case 'estimate_upgrade_cost':
         return await handleEstimateUpgradeCost(input);
       case 'get_actual_costs':
@@ -142,6 +146,93 @@ function handleGetTopologySummary(): ToolResult {
   }
 
   return { content: [{ text: JSON.stringify(summary, null, 2) }], status: 'success' };
+}
+
+/**
+ * Resolve what the user typed to a DX Gateway id. They will say "compare primary
+ * against secondary", meaning names, so an id-only lookup would fail on almost
+ * every real question. Order is most-specific first, and an ambiguous or unknown
+ * term returns the full gateway list rather than a bare failure, so the model can
+ * retry in the same turn instead of asking the user to go find an id.
+ */
+function resolveDxGatewayId(topology: TopologyData, term: string): { id: string } | { error: string } {
+  const gateways = topology.dxGateways;
+  const list = () =>
+    gateways
+      .map((g) => `${g.directConnectGatewayName || '(unnamed)'} (${g.directConnectGatewayId})`)
+      .join('; ') || 'none';
+
+  const needle = term.trim().toLowerCase();
+  if (!needle) return { error: `No DX Gateway specified. Available gateways: ${list()}` };
+
+  const byId = gateways.find((g) => g.directConnectGatewayId.toLowerCase() === needle);
+  if (byId) return { id: byId.directConnectGatewayId };
+
+  const byName = gateways.filter((g) => (g.directConnectGatewayName ?? '').toLowerCase() === needle);
+  if (byName.length === 1) return { id: byName[0].directConnectGatewayId };
+  if (byName.length > 1) {
+    return {
+      error: `"${term}" matches ${byName.length} DX Gateways by name (${byName.map((g) => g.directConnectGatewayId).join(', ')}). Ask the user which one, or pass the gateway ID.`,
+    };
+  }
+
+  const partial = gateways.filter(
+    (g) =>
+      (g.directConnectGatewayName ?? '').toLowerCase().includes(needle)
+      || g.directConnectGatewayId.toLowerCase().includes(needle),
+  );
+  if (partial.length === 1) return { id: partial[0].directConnectGatewayId };
+  if (partial.length > 1) {
+    return {
+      error: `"${term}" is ambiguous — it matches: ${partial.map((g) => `${g.directConnectGatewayName || '(unnamed)'} (${g.directConnectGatewayId})`).join('; ')}. Ask the user which one, or pass the gateway ID.`,
+    };
+  }
+  return { error: `No DX Gateway matches "${term}". Available gateways: ${list()}` };
+}
+
+function handleCompareDxGateways(input: Record<string, unknown>): ToolResult {
+  const topology = useTopologyStore.getState().topologyData;
+  if (!topology) {
+    return { content: [{ text: 'No topology data loaded.' }], status: 'error' };
+  }
+  if (topology.dxGateways.length < 2) {
+    return {
+      content: [{
+        text: `This topology has ${topology.dxGateways.length} DX Gateway(s), so there is no pair to compare. Say so plainly — do not compare VIFs across unrelated gateways as a substitute.`,
+      }],
+      status: 'error',
+    };
+  }
+
+  const a = resolveDxGatewayId(topology, String(input.gateway_a ?? ''));
+  const b = resolveDxGatewayId(topology, String(input.gateway_b ?? ''));
+  if ('error' in a) return { content: [{ text: a.error }], status: 'error' };
+  if ('error' in b) return { content: [{ text: b.error }], status: 'error' };
+  if (a.id === b.id) {
+    return {
+      content: [{ text: `Both terms resolved to the same DX Gateway (${a.id}). Ask the user which two distinct gateways they mean.` }],
+      status: 'error',
+    };
+  }
+
+  const result = compareDxGateways(topology, a.id, b.id);
+  if (!result) {
+    return { content: [{ text: `Could not compare ${a.id} and ${b.id} — one of them is not in the loaded topology.` }], status: 'error' };
+  }
+
+  // The verdict decides how the numbers may be described, so it travels with
+  // them: `independent` gateways differ by design, and calling that a gap would
+  // send someone to "fix" a working router.
+  const guidance = result.relationship.verdict === 'same-routing-domain'
+    ? 'These gateways serve the same downstream. Prefixes present on only one of them have no failover path through the other — report those as gaps.'
+    : result.relationship.verdict === 'independent'
+      ? 'These gateways serve SEPARATE routing domains. Differing prefixes are expected and MUST NOT be reported as a redundancy gap. Present this as a configuration difference only, and say why it is not a gap.'
+      : 'Whether these gateways share a downstream could not be determined. Do NOT call any difference a gap. Report the differences and state that the relationship is unconfirmed because some associations are hidden from this account.';
+
+  return {
+    content: [{ text: JSON.stringify({ ...result, howToReport: guidance }, null, 2) }],
+    status: 'success',
+  };
 }
 
 async function handleEstimateUpgradeCost(input: Record<string, unknown>): Promise<ToolResult> {

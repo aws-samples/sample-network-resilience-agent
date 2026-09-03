@@ -31,17 +31,22 @@ export type MockScenario = 'noResiliency' | 'devTest' | 'high' | 'maximum' | 'cr
 export const WELCOME_MESSAGE =
   'I can see your Direct Connect topology. Ask me anything about improving resiliency or best practices.';
 
+// Accepts the bandwidth strings AWS uses for connections, LAGs, and VIF rate
+// limits: "50Mbps", "1.2Gbps", "1.6Tbps". Tbps matters — DX VIF rate limits and
+// large LAGs go up to 1.6Tbps, and without a T case those parsed as undefined,
+// which silently hides the utilization bar instead of showing a percentage.
 export function parseBandwidthToBps(bw?: string): number | undefined {
   if (!bw) return undefined;
-  const m = bw.match(/^\s*(\d+(?:\.\d+)?)\s*(G|M|K)?bps\s*$/i);
+  const m = bw.match(/^\s*(\d+(?:\.\d+)?)\s*(T|G|M|K)?bps\s*$/i);
   if (!m) return undefined;
   const value = parseFloat(m[1]);
   const unit = (m[2] ?? '').toUpperCase();
-  const mult = unit === 'G' ? 1e9 : unit === 'M' ? 1e6 : unit === 'K' ? 1e3 : 1;
+  const mult = unit === 'T' ? 1e12 : unit === 'G' ? 1e9 : unit === 'M' ? 1e6 : unit === 'K' ? 1e3 : 1;
   return value * mult;
 }
 
 export function formatBps(bps: number): string {
+  if (bps >= 1e12) return `${(bps / 1e12).toFixed(2)} Tbps`;
   if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`;
   if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`;
   if (bps >= 1e3) return `${(bps / 1e3).toFixed(0)} Kbps`;

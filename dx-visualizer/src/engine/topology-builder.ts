@@ -1,6 +1,7 @@
 import type { TopologyData, DxNode, DxEdge, DxNodeData, VpcChildInfo, VpcPeerInfo, TgwChildInfo, VgwChildInfo, DxgwChildInfo, HiddenAssocChildInfo, AggregatedVifInfo } from '../types/topology';
 import type { Vpc, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpnGateway, DxGateway, VpnTunnel } from '../types/aws-resources';
 import { LAYOUT, REGION_NAMES, VPC_TABLE_WIDTH, vpcTableHeight } from '../utils/constants';
+import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { COLORS } from '../utils/colors';
 
 /** Build VPC node details, adding cross-account markers when applicable. */
@@ -65,6 +66,31 @@ function toVgwChildInfo(vgw: VpnGateway): VgwChildInfo {
   if (att) info.attachmentState = att.state;
   else info.attachmentState = 'detached';
   return info;
+}
+
+/**
+ * Header for the allowed-prefix block on a DX-gateway association edge.
+ *
+ * The semantics differ by association target, and this label sits right on the
+ * path where a reader assumes "these are the prefixes on the wire":
+ *   - Transit gateway / Cloud WAN — that reading is correct. Only the listed
+ *     prefixes are advertised on-premises, verbatim, originated from the DX
+ *     gateway ASN, whether or not anything behind the gateway answers for them.
+ *   - Virtual private gateway — the list is only a FILTER. It must be the same
+ *     as or wider than the attached VPC CIDR, and what actually reaches
+ *     on-premises is that VPC CIDR, never the entry itself. So `10.0.0.0/8`
+ *     here does not put a /8 on the wire; it permits the VPC's /16 through.
+ *
+ * An unknown target (cross-account association where AWS omits the type and the
+ * ID gives us nothing) gets the bare header rather than a claim we can't back.
+ * https://docs.aws.amazon.com/directconnect/latest/UserGuide/allowed-to-prefixes.html
+ */
+function allowedPrefixHeader(
+  target: 'transitGateway' | 'virtualPrivateGateway' | 'coreNetwork' | undefined,
+): string {
+  if (target === 'virtualPrivateGateway') return 'Allowed Prefixes (filter)';
+  if (target === 'transitGateway' || target === 'coreNetwork') return 'Allowed Prefixes (advertised)';
+  return 'Allowed Prefixes';
 }
 
 function toDxgwChildInfo(gw: DxGateway): DxgwChildInfo {
@@ -306,9 +332,9 @@ export function buildGraph(
   }
 
   // --- DX Location group nodes + connections ---
-  const publicVifEdges: { awsDevId: string; vif: typeof topology.virtualInterfaces[0]; bgpStatus: string | undefined; prefixes: { accepted?: number; advertised?: number } | undefined; util: { ingressBpsPeak?: number; egressBpsPeak?: number } | undefined; connBandwidth: string | undefined }[] = [];
+  const publicVifEdges: { awsDevId: string; vif: typeof topology.virtualInterfaces[0]; bgpStatus: string | undefined; prefixes: { accepted?: number; advertised?: number } | undefined; hasRouteData: boolean | undefined; util: { ingressBpsPeak?: number; egressBpsPeak?: number } | undefined; connBandwidth: string | undefined }[] = [];
   // Collect VIF edges per (awsDevice → gateway) pair for aggregation
-  type PendingVif = { vifType: 'private' | 'transit' | 'public'; vlan: number; vifState: string; bgpStatus: string | undefined; vifId: string; prefixesAccepted: number | undefined; prefixesAdvertised: number | undefined; utilizationIngressBps: number | undefined; utilizationEgressBps: number | undefined; connectionBandwidth: string | undefined; source: string; target: string };
+  type PendingVif = { vifType: 'private' | 'transit' | 'public'; vlan: number; vifState: string; bgpStatus: string | undefined; vifId: string; vifName: string | undefined; prefixesAccepted: number | undefined; prefixesAdvertised: number | undefined; hasRouteData: boolean | undefined; vifRateLimit: string | undefined; utilizationIngressBps: number | undefined; utilizationEgressBps: number | undefined; connectionBandwidth: string | undefined; source: string; target: string };
   const pendingVifEdges = new Map<string, PendingVif[]>();
   for (const loc of usedLocations) {
     const locNodeId = `dxloc-${loc.locationCode}`;
@@ -443,13 +469,16 @@ export function buildGraph(
           ? (vif.bgpPeers.some((p) => p.bgpStatus === 'up') ? 'up' : 'down')
           : undefined;
         const prefixes = topology.bgpPrefixMetrics?.get(vif.virtualInterfaceId);
+        // Only a flag rides on the edge — VifRoutePanel reads the routes
+        // themselves straight out of TopologyData.vifRoutes.
+        const hasRouteData = topology.vifRoutes?.has(vif.virtualInterfaceId) || undefined;
         const util = topology.vifUtilization?.get(vif.virtualInterfaceId);
 
         if (vif.directConnectGatewayId) {
           const dxgwId = `dxgw-${vif.directConnectGatewayId}`;
           const vifEdgeKey = `${awsDevId}|${dxgwId}`;
           const bucket = pendingVifEdges.get(vifEdgeKey) ?? [];
-          bucket.push({ vifType: vif.virtualInterfaceType, vlan: vif.vlan, vifState: vif.virtualInterfaceState, bgpStatus, vifId: vif.virtualInterfaceId, prefixesAccepted: prefixes?.accepted, prefixesAdvertised: prefixes?.advertised, utilizationIngressBps: util?.ingressBpsPeak, utilizationEgressBps: util?.egressBpsPeak, connectionBandwidth: conn.bandwidth, source: awsDevId, target: dxgwId });
+          bucket.push({ vifType: vif.virtualInterfaceType, vlan: vif.vlan, vifState: vif.virtualInterfaceState, bgpStatus, vifId: vif.virtualInterfaceId, vifName: vif.virtualInterfaceName || undefined, prefixesAccepted: prefixes?.accepted, prefixesAdvertised: prefixes?.advertised, hasRouteData, vifRateLimit: vif.rateLimit, utilizationIngressBps: util?.ingressBpsPeak, utilizationEgressBps: util?.egressBpsPeak, connectionBandwidth: conn.bandwidth, source: awsDevId, target: dxgwId });
           pendingVifEdges.set(vifEdgeKey, bucket);
         }
         // VIF attached directly to VGW (no DX Gateway)
@@ -457,12 +486,12 @@ export function buildGraph(
           const vgwId = `vgw-${vif.virtualGatewayId}`;
           const vifEdgeKey = `${awsDevId}|${vgwId}`;
           const bucket = pendingVifEdges.get(vifEdgeKey) ?? [];
-          bucket.push({ vifType: vif.virtualInterfaceType, vlan: vif.vlan, vifState: vif.virtualInterfaceState, bgpStatus, vifId: vif.virtualInterfaceId, prefixesAccepted: prefixes?.accepted, prefixesAdvertised: prefixes?.advertised, utilizationIngressBps: util?.ingressBpsPeak, utilizationEgressBps: util?.egressBpsPeak, connectionBandwidth: conn.bandwidth, source: awsDevId, target: vgwId });
+          bucket.push({ vifType: vif.virtualInterfaceType, vlan: vif.vlan, vifState: vif.virtualInterfaceState, bgpStatus, vifId: vif.virtualInterfaceId, vifName: vif.virtualInterfaceName || undefined, prefixesAccepted: prefixes?.accepted, prefixesAdvertised: prefixes?.advertised, hasRouteData, vifRateLimit: vif.rateLimit, utilizationIngressBps: util?.ingressBpsPeak, utilizationEgressBps: util?.egressBpsPeak, connectionBandwidth: conn.bandwidth, source: awsDevId, target: vgwId });
           pendingVifEdges.set(vifEdgeKey, bucket);
         }
         // Public VIF — no DXGW or VGW, routes to AWS public endpoints
         if (vif.virtualInterfaceType === 'public' && !vif.directConnectGatewayId && !vif.virtualGatewayId) {
-          publicVifEdges.push({ awsDevId, vif, bgpStatus, prefixes, util, connBandwidth: conn.bandwidth });
+          publicVifEdges.push({ awsDevId, vif, bgpStatus, prefixes, hasRouteData, util, connBandwidth: conn.bandwidth });
         }
       }
     }
@@ -478,8 +507,11 @@ export function buildGraph(
         vifState: v.vifState,
         bgpStatus: v.bgpStatus,
         vifId: v.vifId,
+        vifName: v.vifName,
         prefixesAccepted: v.prefixesAccepted,
         prefixesAdvertised: v.prefixesAdvertised,
+        hasRouteData: v.hasRouteData,
+        vifRateLimit: v.vifRateLimit,
         utilizationIngressBps: v.utilizationIngressBps,
         utilizationEgressBps: v.utilizationEgressBps,
         connectionBandwidth: v.connectionBandwidth,
@@ -497,6 +529,13 @@ export function buildGraph(
       const bgpDownCount = bucket.filter((v) => v.bgpStatus && !/up/i.test(v.bgpStatus)).length;
       const totalIngress = bucket.reduce((sum, v) => sum + (v.utilizationIngressBps ?? 0), 0);
       const totalEgress = bucket.reduce((sum, v) => sum + (v.utilizationEgressBps ?? 0), 0);
+      // Combined ceiling for the aggregate edge — see the note at its use below.
+      // Only meaningful when every member VIF carries a rate limit.
+      const allRateLimited = bucket.every((v) => !!v.vifRateLimit);
+      const summedRateLimitBps = allRateLimited
+        ? bucket.reduce((sum, v) => sum + (parseBandwidthToBps(v.vifRateLimit) ?? 0), 0)
+        : 0;
+      const aggregateRateLimit = summedRateLimitBps > 0 ? formatBps(summedRateLimitBps) : undefined;
       const first = bucket[0];
       edges.push(makeEdge(first.source, first.target, {
         vifType: types.size === 1 ? first.vifType : 'private',
@@ -508,14 +547,22 @@ export function buildGraph(
         utilizationIngressBps: totalIngress || undefined,
         utilizationEgressBps: totalEgress || undefined,
         connectionBandwidth: first.connectionBandwidth,
+        // This edge's utilization is the SUM across its member VIFs, so the
+        // matching ceiling is the sum of their rate limits — but only when every
+        // member is rate-limited. If any member is uncapped it can use the whole
+        // port, so the port bandwidth remains the real ceiling.
+        vifRateLimit: aggregateRateLimit,
         aggregatedVifs: bucket.map((v) => ({
           vifId: v.vifId,
+          vifName: v.vifName,
           vifType: v.vifType,
           vlan: v.vlan,
           vifState: v.vifState,
           bgpStatus: v.bgpStatus,
           prefixesAccepted: v.prefixesAccepted,
           prefixesAdvertised: v.prefixesAdvertised,
+          hasRouteData: v.hasRouteData,
+          vifRateLimit: v.vifRateLimit,
           utilizationIngressBps: v.utilizationIngressBps,
           utilizationEgressBps: v.utilizationEgressBps,
           connectionBandwidth: v.connectionBandwidth,
@@ -538,7 +585,7 @@ export function buildGraph(
         vifCount: String(vifCount),
       },
     }));
-    for (const { awsDevId, vif, bgpStatus, prefixes, util, connBandwidth } of publicVifEdges) {
+    for (const { awsDevId, vif, bgpStatus, prefixes, hasRouteData, util, connBandwidth } of publicVifEdges) {
       edges.push(
         makeEdge(awsDevId, pubNodeId, {
           vifType: vif.virtualInterfaceType,
@@ -546,8 +593,10 @@ export function buildGraph(
           vifState: vif.virtualInterfaceState,
           bgpStatus,
           vifId: vif.virtualInterfaceId,
+          vifName: vif.virtualInterfaceName || undefined,
           prefixesAccepted: prefixes?.accepted,
           prefixesAdvertised: prefixes?.advertised,
+          hasRouteData,
           utilizationIngressBps: util?.ingressBpsPeak,
           utilizationEgressBps: util?.egressBpsPeak,
           connectionBandwidth: connBandwidth,
@@ -994,7 +1043,9 @@ export function buildGraph(
               if (cloudWanTgwIds.has(tgw.transitGatewayId)) continue; // routed via Core Network instead
               const prefixes = assoc.allowedPrefixes;
               const labelParts: string[] = [];
-              if (prefixes.length > 0) labelParts.push(`Allowed Prefixes\n${prefixes.join('\n')}`);
+              if (prefixes.length > 0) {
+                labelParts.push(`${allowedPrefixHeader('transitGateway')}\n${prefixes.join('\n')}`);
+              }
               if (assoc.associationState) labelParts.push(`State: ${assoc.associationState}`);
               edges.push(makeEdge(`dxgw-${assoc.directConnectGatewayId}`, tgwId, {
                 label: labelParts.length > 0 ? labelParts.join('\n') : undefined,
@@ -1183,7 +1234,9 @@ export function buildGraph(
       if (assoc) {
         const prefixes = assoc.allowedPrefixes;
         const labelParts: string[] = [];
-        if (prefixes.length > 0) labelParts.push(`Allowed Prefixes\n${prefixes.join('\n')}`);
+        if (prefixes.length > 0) {
+          labelParts.push(`${allowedPrefixHeader('virtualPrivateGateway')}\n${prefixes.join('\n')}`);
+        }
         if (assoc.associationState) labelParts.push(`State: ${assoc.associationState}`);
         edges.push(makeEdge(`dxgw-${assoc.directConnectGatewayId}`, vgwId, {
           label: labelParts.length > 0 ? labelParts.join('\n') : undefined,
@@ -1304,7 +1357,12 @@ export function buildGraph(
     // DX Gateway → VGW/TGW edge
     const prefixes = assoc.allowedPrefixes;
     const labelParts: string[] = [];
-    if (prefixes.length > 0) labelParts.push(`Allowed Prefixes\n${prefixes.join('\n')}`);
+    if (prefixes.length > 0) {
+      // `resolvedType` may be undefined here — a cross-account association whose
+      // type AWS omitted and whose ID prefix told us nothing. The header then
+      // stays neutral rather than asserting filter-vs-advertised wrongly.
+      labelParts.push(`${allowedPrefixHeader(resolvedType)}\n${prefixes.join('\n')}`);
+    }
     if (assoc.associationState) labelParts.push(`State: ${assoc.associationState}`);
     edges.push(makeEdge(`dxgw-${assoc.directConnectGatewayId}`, nodeId, {
       label: labelParts.length > 0 ? labelParts.join('\n') : undefined,
@@ -1358,7 +1416,9 @@ export function buildGraph(
         if (aDirect && !associationState) associationState = a.associationState;
       }
       const prefixes = [...allPrefixes];
-      if (prefixes.length > 0) labelParts.push(`Allowed Prefixes\n${prefixes.join('\n')}`);
+      if (prefixes.length > 0) {
+        labelParts.push(`${allowedPrefixHeader('coreNetwork')}\n${prefixes.join('\n')}`);
+      }
       if (associationState) labelParts.push(`State: ${associationState}`);
       edges.push(makeEdge(dxgwNodeId, cnId, {
         label: labelParts.length > 0 ? labelParts.join('\n') : undefined,
@@ -1892,6 +1952,11 @@ function makeEdge(source: string, target: string, data?: DxEdge['data'] & { tunn
   let label = data?.label;
   if (data?.vifType && !data?.aggregatedVifs) {
     const parts = [`${data.vifType.charAt(0).toUpperCase() + data.vifType.slice(1)} VIF${data.vlan ? ` · VLAN ${data.vlan}` : ''}`];
+    // Name above ID, matching the DX Connection label's name/ID ordering (and
+    // CustomEdge's per-line colouring, which tints line 1 as the name). Skipped
+    // when AWS reports no name, or when the name IS the ID — either would print
+    // the same token twice.
+    if (data.vifName && data.vifName !== data.vifId) parts.push(data.vifName);
     if (data.vifId) parts.push(data.vifId);
     label = parts.join('\n');
   }

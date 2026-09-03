@@ -11,6 +11,18 @@ interface TgwRoutePanelProps {
   nodeId: string;
 }
 
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  'vpc': 'VPC',
+  'vpn': 'VPN',
+  'direct-connect-gateway': 'DX GW',
+  'peering': 'Peering',
+  'connect': 'Connect',
+};
+
+function resourceTypeLabel(resourceType: string): string {
+  return RESOURCE_TYPE_LABELS[resourceType] || resourceType;
+}
+
 export function TgwRoutePanel({ routeTables, onClose, nodeId }: TgwRoutePanelProps) {
   const theme = useTopologyStore((s) => s.theme);
   const r = useRedact();
@@ -222,6 +234,64 @@ export function TgwRoutePanel({ routeTables, onClose, nodeId }: TgwRoutePanelPro
         </div>
       )}
 
+      {/* Propagations for the selected table. Rendered only when we actually
+          queried them: `undefined` means not fetched or AccessDenied, and showing
+          "none" for that would read as a blackhole that may not exist. An empty
+          array IS meaningful — AWS confirmed nothing propagates here, which is
+          the silent-blackhole case worth flagging. */}
+      {selectedRt?.propagations && (
+        <div style={{
+          padding: `${5 * z}px ${10 * z}px`,
+          borderBottom: `1px solid ${light ? '#e2e5ea' : 'rgba(139,92,246,0.15)'}`,
+          flexShrink: 0,
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 4 * z,
+        }}>
+          <span style={{
+            fontSize: `${7.5 * z}px`,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: 0.3,
+            color: light ? '#64748b' : '#94a3b8',
+          }}>
+            Propagating
+          </span>
+          {selectedRt.propagations.length === 0 ? (
+            <span style={{ fontSize: `${8 * z}px`, color: light ? '#b45309' : '#fbbf24' }}>
+              nothing — routes here must be static
+            </span>
+          ) : (
+            selectedRt.propagations.map((p) => {
+              const isDx = /direct-connect|dxgw/i.test(p.resourceType);
+              const enabled = p.state === 'enabled';
+              return (
+                <span
+                  key={p.transitGatewayAttachmentId}
+                  title={`${p.resourceType} ${p.resourceId} (${p.state})`}
+                  style={{
+                    fontSize: `${7.5 * z}px`,
+                    fontWeight: isDx ? 700 : 500,
+                    borderRadius: 3 * z,
+                    padding: `0 ${3 * z}px`,
+                    backgroundColor: enabled
+                      ? (light ? 'rgba(34,197,94,0.1)' : 'rgba(34,197,94,0.18)')
+                      : (light ? 'rgba(245,158,11,0.12)' : 'rgba(245,158,11,0.2)'),
+                    color: enabled
+                      ? (light ? '#15803d' : '#4ade80')
+                      : (light ? '#b45309' : '#fbbf24'),
+                  }}
+                >
+                  {resourceTypeLabel(p.resourceType)}
+                  {!enabled && ` (${p.state})`}
+                </span>
+              );
+            })
+          )}
+        </div>
+      )}
+
       {/* Scrollable route list for selected tab */}
       <div style={{ overflowY: 'auto', padding: `${8 * z}px ${10 * z}px` }}>
         {!selectedRt ? (
@@ -231,15 +301,7 @@ export function TgwRoutePanel({ routeTables, onClose, nodeId }: TgwRoutePanelPro
             {selectedRt.routes.map((route, i) => {
               const isBlackhole = route.state === 'blackhole';
               const target = route.transitGatewayAttachments[0];
-              const resourceTypeMap: Record<string, string> = {
-                'vpc': 'VPC',
-                'vpn': 'VPN',
-                'direct-connect-gateway': 'DX GW',
-                'peering': 'Peering',
-              };
-              const targetLabel = target
-                ? resourceTypeMap[target.resourceType] || target.resourceType
-                : '-';
+              const targetLabel = target ? resourceTypeLabel(target.resourceType) : '-';
               return (
                 <div
                   key={i}

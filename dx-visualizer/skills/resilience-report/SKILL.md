@@ -63,6 +63,7 @@ Before any AWS calls, confirm all of the following in one shell command per chec
 3. A primary region is set. Use `AWS_REGION` if exported, else `aws configure get region`, else ask the user.
 4. The caller has at minimum these read permissions (the skill is purely read-only):
    - `directconnect:Describe*`
+   - `directconnect:ListVirtualInterfaceRoutes` (BGP route visibility — **not** covered by `Describe*`; optional, degrade gracefully if denied)
    - `ec2:Describe*` (for VPC/VGW/TGW/VPN/CGW)
    - `networkmanager:List*` / `networkmanager:Get*`
    - `cloudwatch:GetMetricData`, `cloudwatch:ListMetrics`
@@ -287,7 +288,7 @@ Execute Phases 1–3 as described:
   1. Prerequisite checks (`aws --version`, `aws sts get-caller-identity`,
      region detection). If any fails, stop and tell the user how to fix it.
   2. Fetch the topology in parallel per region per fetch-checklist.md.
-  3. Assess against the 5 resiliency + 19 best-practice rules. Compute the
+  3. Assess against the 5 resiliency + 18 best-practice rules. Compute the
      score and tier per the formula in SKILL.md.
   4. Render report-template.html, substituting every {{TOKEN}}.
   5. Save to ~/Desktop/dx-resilience-report-<ACCOUNT-ID>-<YYYY-MM-DD>.html.

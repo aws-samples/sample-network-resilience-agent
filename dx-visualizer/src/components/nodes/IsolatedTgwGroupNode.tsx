@@ -2,6 +2,7 @@ import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData, TgwChildInfo } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
+import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { useRedact } from '../../utils/redact';
 import { TransitGatewayIcon } from './aws-icons';
@@ -27,7 +28,7 @@ export function IsolatedTgwGroupNode({ data, id }: NodeProps) {
   const isTable = isolatedTgwGroupViewMode.has(groupKey);
   const tgwChildren = (d.tgwChildren as TgwChildInfo[] | undefined) ?? [];
   const baseShadow = theme === 'light' ? COLORS.light.nodeShadow : '0 1px 3px rgba(0,0,0,0.3)';
-  const dimOpacity = isDimmed ? 0.25 : undefined;
+  const dimOpacity = isDimmed ? dimOpacityFor('node', theme === 'light') : undefined;
 
   if (isTable) {
     return (

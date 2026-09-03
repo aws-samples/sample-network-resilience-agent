@@ -40,6 +40,11 @@ function makeFixture(): TopologyData {
         ],
         region: 'us-east-1',
         ownerAccount: '111122223333',
+        // A public VIF's advertised prefixes — the customer's real routable
+        // blocks. Deliberately NOT documentation-reserved ranges, or
+        // SPECIAL_CIDRS would pass them through and the leak scan below would
+        // prove nothing.
+        routeFilterPrefixes: [{ cidr: '52.94.16.0/22' }, { cidr: '104.28.9.0/24' }],
       },
     ],
     dxGateways: [
@@ -161,6 +166,9 @@ function makeFixture(): TopologyData {
             routes: [
               { destinationCidrBlock: '10.0.0.0/16', gatewayId: 'local', state: 'active' },
               { destinationCidrBlock: '0.0.0.0/0', transitGatewayId: 'tgw-aaaa1111', state: 'active' },
+              // IPv6 destination — populated from DescribeRouteTables just like
+              // the IPv4 field, and previously spread through unmasked.
+              { destinationIpv6CidrBlock: '2600:1f18:abcd::/56', transitGatewayId: 'tgw-aaaa1111', state: 'active' },
             ],
           },
         ],
@@ -174,6 +182,50 @@ function makeFixture(): TopologyData {
       ['dxcon-abc12345', { ingressBpsPeak: 800_000_000, egressBpsPeak: 400_000_000 }],
     ]),
     utilizationWindowDays: 30,
+    vifRoutes: new Map([
+      ['dxvif-deadbeef', {
+        accepted: [
+          {
+            cidr: '192.168.50.0/24',
+            addressFamily: 'ipv4' as const,
+            asPath: [{ pathType: 'seq' as const, path: [65000, 65001] }],
+            communities: ['65000:100'],
+            routeDirection: 'accepted' as const,
+            routeInstalledAt: '2026-08-01T09:15:00.000Z',
+          },
+          {
+            // Default route must survive verbatim or route semantics break.
+            cidr: '0.0.0.0/0',
+            addressFamily: 'ipv4' as const,
+            asPath: [{ pathType: 'seq' as const, path: [65000] }],
+            communities: [],
+            routeDirection: 'accepted' as const,
+          },
+        ],
+        advertised: [{
+          cidr: '172.31.0.0/16',
+          addressFamily: 'ipv4' as const,
+          asPath: [{ pathType: 'seq' as const, path: [64512] }],
+          communities: ['7224:8100'],
+          routeDirection: 'advertised' as const,
+        }],
+      }],
+    ]),
+    // Failover test history. `testId` is a bare dashless AWS token, which is
+    // exactly the shape resourceId() passes through untouched — so it needs to
+    // be in the fixture for the leak scan to prove it gets rewritten.
+    vifFailoverTests: new Map([
+      ['dxvif-deadbeef', [{
+        testId: '0hm9q4ki',
+        virtualInterfaceId: 'dxvif-deadbeef',
+        bgpPeers: ['bgp-peer-001'],
+        status: 'completed',
+        ownerAccount: '111122223333',
+        testDurationInMinutes: 30,
+        startTime: '2026-06-27T02:00:00.000Z',
+        endTime: '2026-06-27T02:30:00.000Z',
+      }]],
+    ]),
     homeAccountId: '111122223333',
     regionNames: new Map([['us-east-1', 'US East (N. Virginia)']]),
   };
@@ -214,6 +266,13 @@ const REAL_VALUES_TO_PURGE = [
   '169.254.1.1/30',
   '169.254.1.2/30',
   '198.18.7.50',
+  // Public-VIF route filter prefixes — real routable blocks, not doc ranges
+  '52.94.16.0/22',
+  '104.28.9.0/24',
+  // IPv6 (RFC 3849 2001:db8::/32 is the doc range; this is deliberately not it)
+  '2600:1f18:abcd::/56',
+  // Opaque AWS tokens with no prefix-suffix shape
+  '0hm9q4ki',
   // ASN
   '4200001001',
   '4200001100',
@@ -303,6 +362,98 @@ describe('sanitize', () => {
     expect(arn).not.toContain('111122223333');
     expect(arn).not.toContain('tgw-aaaa1111');
     expect(arn).toMatch(/^arn:aws:ec2:us-east-1:9\d{11}:transit-gateway\/tgw-\d{8}$/);
+  });
+
+  it('rewrites BGP route CIDRs, AS paths, and community ASNs', () => {
+    const out = sanitizeTopology(makeFixture());
+    const entries = [...out.vifRoutes!.entries()];
+    expect(entries).toHaveLength(1);
+    const [key, routes] = entries[0];
+    // The map key is a VIF id and must be pseudonymized like any resource id.
+    expect(key).not.toBe('dxvif-deadbeef');
+    expect(key).toMatch(/^dxvif-\d{8}$/);
+
+    const specific = routes.accepted.find((r) => r.cidr !== '0.0.0.0/0')!;
+    expect(specific.cidr).not.toBe('192.168.50.0/24');
+    // Real customer ASNs must not survive in the AS path.
+    expect(specific.asPath[0].path).not.toContain(65000);
+    expect(specific.asPath[0].path).not.toContain(65001);
+    expect(specific.asPath[0].path).toHaveLength(2);
+    expect(specific.asPath[0].pathType).toBe('seq');
+    // Communities are "asn:value" — the ASN half is rewritten, the value kept.
+    expect(specific.communities[0]).not.toBe('65000:100');
+    expect(specific.communities[0]).toMatch(/^\d+:100$/);
+
+    expect(routes.advertised[0].cidr).not.toBe('172.31.0.0/16');
+  });
+
+  it('leaves the default route intact so route semantics survive', () => {
+    const out = sanitizeTopology(makeFixture());
+    const cidrs = out.vifRoutes!.get([...out.vifRoutes!.keys()][0])!.accepted.map((r) => r.cidr);
+    // A pseudonymized default route would read as an ordinary prefix, so the
+    // route panels and the DXGW diff would lose the "this is everything" signal
+    // on a sanitized snapshot.
+    expect(cidrs).toContain('0.0.0.0/0');
+  });
+
+  it('maps a route CIDR to the same pseudo as the same CIDR elsewhere in the topology', () => {
+    // One Sanitizer shares its cidrMap across the whole topology, so a prefix
+    // that appears both as a route and as an allowed-prefix must agree —
+    // otherwise the SA sees two unrelated-looking networks.
+    const fixture = makeFixture();
+    const vpcCidr = fixture.vpcs[0]?.cidrBlock;
+    expect(vpcCidr).toBeTruthy();
+    fixture.vifRoutes!.get('dxvif-deadbeef')!.accepted.push({
+      cidr: vpcCidr!,
+      addressFamily: 'ipv4',
+      asPath: [{ pathType: 'seq', path: [65000] }],
+      communities: [],
+      routeDirection: 'accepted',
+    });
+    const out = sanitizeTopology(fixture);
+    const routeCidrs = out.vifRoutes!.get([...out.vifRoutes!.keys()][0])!.accepted.map((r) => r.cidr);
+    expect(routeCidrs).toContain(out.vpcs[0].cidrBlock);
+  });
+
+  it('masks a public VIF\'s route filter prefixes', () => {
+    // These are the customer's real advertised blocks. Every sibling prefix
+    // list is masked, and this one was being spread through verbatim.
+    const out = sanitizeTopology(makeFixture());
+    const prefixes = out.virtualInterfaces[0].routeFilterPrefixes;
+    expect(prefixes).toHaveLength(2);
+    for (const p of prefixes!) {
+      expect(p.cidr).not.toBe('52.94.16.0/22');
+      expect(p.cidr).not.toBe('104.28.9.0/24');
+      // Rewritten into a documentation-reserved range, mask width preserved.
+      expect(p.cidr).toMatch(/^(203\.0\.113|198\.51\.100|192\.0\.2)\.\d+\/\d+$/);
+    }
+    expect(prefixes![0].cidr.endsWith('/22')).toBe(true);
+    expect(prefixes![1].cidr.endsWith('/24')).toBe(true);
+  });
+
+  it('masks an IPv6 prefix into IPv6 space, not a mangled IPv4 block', () => {
+    // The IPv4 allocator would emit "203.0.113.0/56" — masked, but not a valid
+    // prefix, so anything that parses it downstream reads garbage.
+    const out = sanitizeTopology(makeFixture());
+    const v6 = out.vpcRouteTables.get([...out.vpcRouteTables.keys()][0])![0]
+      .routes.find((r) => r.destinationIpv6CidrBlock)!;
+    expect(v6.destinationIpv6CidrBlock).not.toBe('2600:1f18:abcd::/56');
+    expect(v6.destinationIpv6CidrBlock).toMatch(/^2001:db8:[0-9a-f]+::\/56$/);
+  });
+
+  it('rewrites a dashless failover testId, which resourceId() cannot', () => {
+    // resourceId() needs a "prefix-suffix" shape and returns bare tokens
+    // unchanged by design, so testId needs its own allocator.
+    const out = sanitizeTopology(makeFixture());
+    // Key is the pseudonymized VIF ID; take the sole entry rather than
+    // hardcoding whatever counter value it landed on.
+    const entries = [...out.vifFailoverTests!.values()];
+    expect(entries).toHaveLength(1);
+    const test = entries[0][0];
+    expect(test.testId).not.toBe('0hm9q4ki');
+    expect(test.testId).toMatch(/^test\d+$/);
+    // The account that ran it is still masked, and the VIF key still maps.
+    expect(test.ownerAccount).not.toBe('111122223333');
   });
 
   it('is idempotent across two passes with the same Sanitizer', () => {

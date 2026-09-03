@@ -2,6 +2,7 @@ import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
+import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { TransitGatewayIcon } from './aws-icons';
 
@@ -35,7 +36,7 @@ export function TgwGroupNode({ data, id }: NodeProps) {
         backgroundColor: bg,
         minWidth: 90,
         boxShadow: baseShadow,
-        opacity: isDimmed ? 0.25 : 1,
+        opacity: isDimmed ? dimOpacityFor('node', theme === 'light') : 1,
       }}
       onClick={() => toggleTgwGroup(groupKey)}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTgwGroup(groupKey); } }}
