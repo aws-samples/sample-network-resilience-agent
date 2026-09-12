@@ -3,6 +3,7 @@ import { buildHtmlReport } from '../useExportReport';
 import { analyzeTopology } from '../../engine/recommendation-engine';
 import { getMockTopology } from '../../utils/mock-data';
 import type { MockScenario } from '../../utils/shared';
+import { stripTags } from './helpers';
 
 /**
  * The route-table appendix: every prefix on every VIF, both directions, with the AS
@@ -110,7 +111,7 @@ describe('matrix cell links into the route tables', () => {
     const out = new Map<string, { vifId: string; prefix: string }>();
     for (const m of html.matchAll(/<tr id="(rr-\d+)">([\s\S]*?)<\/tr>/g)) {
       const tds = [...m[2].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]
-        .map((t) => t[1].replace(/<[^>]+>/g, ''));
+        .map((t) => stripTags(t[1]));
       out.set(m[1], { vifId: tds[1], prefix: tds[5] });
     }
     return out;

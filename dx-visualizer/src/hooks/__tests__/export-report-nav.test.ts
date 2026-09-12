@@ -3,6 +3,7 @@ import { buildHtmlReport } from '../useExportReport';
 import { analyzeTopology } from '../../engine/recommendation-engine';
 import { getMockTopology } from '../../utils/mock-data';
 import type { MockScenario } from '../../utils/shared';
+import { stripTags } from './helpers';
 
 const SCENARIOS: MockScenario[] = ['noResiliency', 'devTest', 'high', 'maximum', 'crossAccount'];
 
@@ -174,7 +175,7 @@ describe('executive summary', () => {
 
   it('agrees in number with the data it describes', () => {
     for (const s of SCENARIOS) {
-      const text = render(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      const text = stripTags(render(s), ' ').replace(/\s+/g, ' ');
       expect(text).not.toMatch(/All 1 assessed scope sit /);
       expect(text).not.toMatch(/There are 1 critical finding\b/);
       expect(text).not.toMatch(/There is \d\d+ critical/);
@@ -185,7 +186,7 @@ describe('executive summary', () => {
     // crossAccount has several gateways; if their tiers differ the summary must
     // say so rather than quoting one figure for the whole account.
     const html = render('crossAccount');
-    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const text = stripTags(html, ' ').replace(/\s+/g, ' ');
     expect(text).toMatch(/assessed scopes? sits? at|Resilience is uneven across scopes|no scope to tier/);
   });
 });
