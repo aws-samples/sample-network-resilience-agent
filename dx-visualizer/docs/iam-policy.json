@@ -15,6 +15,7 @@
         "directconnect:DescribeLags",
         "directconnect:ListVirtualInterfaceRoutes",
         "directconnect:ListVirtualInterfaceTestHistory",
+        "ec2:DescribeRegions",
         "ec2:DescribeVpcs",
         "ec2:DescribeVpnGateways",
         "ec2:DescribeTransitGateways",
@@ -86,7 +87,10 @@
       "Action": [
         "sts:AssumeRole"
       ],
-      "Resource": "arn:aws:iam::*:role/NetworkReadOnlyRole"
+      "Resource": [
+        "arn:aws:iam::REPLACE_WITH_SPOKE_ACCOUNT_ID_1:role/NetworkReadOnlyRole",
+        "arn:aws:iam::REPLACE_WITH_SPOKE_ACCOUNT_ID_2:role/NetworkReadOnlyRole"
+      ]
     },
     {
       "Sid": "DxVisualizerRegionNames",

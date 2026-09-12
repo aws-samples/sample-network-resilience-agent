@@ -169,14 +169,26 @@ export function buildGraph(
           cgwDetails.type = cgw.type;
           cgwDetails.state = cgw.state;
         }
-        // Prefer hosting the VPN router in an existing DX Customer Data
-        // Center zone so both CGWs share one container. Fall back to a
-        // dedicated VPN site for pure-VPN topologies (no DX custsites).
-        const existingDxSite = nodes.find((n) =>
-          n.data.category === 'customerSite' &&
-          !n.id.startsWith('custsite-vpn-') &&
-          !n.id.startsWith('rec-'),
-        );
+        // Prefer an existing DX Customer Data Center in the VPN gateway's
+        // region, then choose by stable site ID. A first-match lookup made the
+        // parent container depend on AWS response order, so the app and a
+        // report built from equivalent data could place this same router under
+        // different sites.
+        const siteRegion = (node: DxNode): string => {
+          const locationCode = (node.data.details as Record<string, string> | undefined)?.locationCode;
+          return topology.locations.find((location) => location.locationCode === locationCode)?.region ?? '';
+        };
+        const existingDxSite = nodes
+          .filter((n) =>
+            n.data.category === 'customerSite' &&
+            !n.id.startsWith('custsite-vpn-') &&
+            !n.id.startsWith('rec-'),
+          )
+          .sort((a, b) => {
+            const aSameRegion = siteRegion(a) === region ? 1 : 0;
+            const bSameRegion = siteRegion(b) === region ? 1 : 0;
+            return bSameRegion - aSameRegion || a.id.localeCompare(b.id);
+          })[0];
         if (existingDxSite) {
           cgwDetails.hostSiteId = existingDxSite.id;
         } else {

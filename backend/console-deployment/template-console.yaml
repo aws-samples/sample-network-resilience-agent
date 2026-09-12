@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Resilience Agent SSO Backend — handles AWS IAM Identity Center
+  device authorization flow for the Network Resilience Agent SPA.
+  Console/manual deployment variant: the Lambda code is read from a
+  prebuilt zip in S3 (ArtifactBucket/ArtifactKey) instead of being
+  built by SAM. Upload console-deployment/lambda.zip to your bucket
+  first, then deploy this template.
+
+Parameters:
+  AllowedOrigins:
+    Type: String
+    AllowedPattern: '^https?://[^,\s*][^,\s]*(,https?://[^,\s*][^,\s]*)*$'
+    ConstraintDescription: >
+      Must be a comma-separated list of concrete http(s) origins
+      (e.g., "https://app.example.com,https://staging.example.com").
+      Wildcards are rejected — this backend returns temporary IAM
+      credentials and must only accept requests from known SPA origins.
+    Description: >
+      CORS allowed origins for the SPA. Comma-separated. Wildcards are
+      rejected. Must match the SPA's deployed origin exactly (scheme +
+      host + optional port). For local Vite preview use http://localhost:4173
+
+  ArtifactBucket:
+    Type: String
+    Description: >
+      Name of the S3 bucket (in THIS region) where you uploaded
+      lambda.zip. The bucket must be in the same region as this stack.
+
+  ArtifactKey:
+    Type: String
+    Default: lambda.zip
+    Description: >
+      S3 object key of the uploaded Lambda zip within ArtifactBucket.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
+
+Resources:
+  SsoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda.handler
+      CodeUri:
+        Bucket: !Ref ArtifactBucket
+        Key: !Ref ArtifactKey
+      Description: SSO OIDC device authorization flow handler
+      Environment:
+        Variables:
+          NODE_ENV: production
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+      Events:
+        ProxyApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SsoApi
+            Path: /{proxy+}
+            Method: ANY
+        RootApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SsoApi
+            Path: /
+            Method: ANY
+  SsoApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins: !Split [',', !Ref AllowedOrigins]
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Requested-By
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        MaxAge: 3600
+      # Kept in step with ../template.yaml on purpose. This is a SECOND
+      # deployment path for the same backend, so a control that exists in only
+      # one of the two templates is a control that a console-deployed stack
+      # silently does without. src/__tests__/template-parity.test.ts fails if
+      # either template gains a security control the other lacks.
+      #
+      # /auth/sso/connect returns temporary IAM credentials, so who called it,
+      # from where, and with what result must be recorded. Without this block
+      # source IP / route / status / latency are silently dropped. No IAM change
+      # is needed: HTTP APIs write access logs directly (unlike REST APIs, which
+      # need an account-level CloudWatch role).
+      AccessLogSettings:
+        DestinationArn: !GetAtt SsoApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","sourceIp":"$context.identity.sourceIp","requestTime":"$context.requestTime","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength","integrationErrorMessage":"$context.integrationErrorMessage"}'
+      # The real GLOBAL request ceiling. The per-clientId poll throttle and the
+      # express-rate-limit IP limit in src/app.ts are in-process, so under
+      # Lambda they bound each warm container independently — application-layer
+      # defence-in-depth, not a deployment-wide limit. This is the limit that
+      # actually caps aggregate traffic to the credential-issuing endpoints.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+
+  # Retained for 30 days, deliberately longer than the Lambda group's 7 below:
+  # access logs are the forensic primary record for a credential-issuing
+  # endpoint, and an incident is rarely noticed within a week.
+  SsoApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${AWS::StackName}-sso
+      RetentionInDays: 30
+
+  SsoFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SsoFunction}
+      RetentionInDays: 7
+
+Outputs:
+  ApiUrl:
+    Description: >
+      SSO Backend API URL — paste this into the Resilience Agent app
+      when using SSO authentication.
+    Value: !Sub https://${SsoApi}.execute-api.${AWS::Region}.amazonaws.com

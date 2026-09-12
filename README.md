@@ -63,7 +63,7 @@ npm run preview        # Preview production build locally
 ./scripts/package.sh   # Create distributable zip (start.sh/start.bat included)
 ```
 
-> The commands above run the app on **localhost**, which is all you need to evaluate it — the SPA calls AWS APIs directly from the browser, so there's no application server to host. `npm run build` emits a **static bundle** (`dist/`), so you're free to host it your own way (S3 + CloudFront, an nginx container on EKS/ECS, any static web server). Hosting elsewhere doesn't change the credential model or IAM policy. See **[Building for Production in SETUP.md](dx-visualizer/docs/SETUP.md#7-building-for-production-optional)** for hosting notes.
+> The commands above run the app on **localhost**, which is all you need to evaluate it — the SPA calls AWS APIs directly from the browser, so there's no application server to host. `npm run build` emits a **static bundle** (`dist/`), so you're free to host it your own way (S3 + CloudFront, an nginx container on EKS/ECS, any static web server). Hosting elsewhere doesn't change the credential model or IAM policy. See **[Building for Production in SETUP.md](dx-visualizer/docs/SETUP.md#7-building-for-production)** for hosting notes, including the security response headers your static host must emit.
 
 ## 2. Solution Architecture
 
@@ -259,7 +259,7 @@ The model can invoke tools during the conversation to fetch live data or control
 
 ### 6.5 Chat Guardrails
 
-The system prompt includes built-in guardrails to ensure accurate, grounded responses:
+The system prompt includes built-in guardrails to ensure accurate, grounded responses. These are **prompt-level** rules, enforced by instructing the model. They are a separate mechanism from **Amazon Bedrock Guardrails**, the server-side filter (prompt-attack detection, content and PII filters, denied topics) that is a required production step — configure that per [Section 8.1 of SETUP.md](dx-visualizer/docs/SETUP.md#81-bedrock-guardrails).
 
 | Rule | Description |
 |------|-------------|

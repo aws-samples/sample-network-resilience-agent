@@ -86,7 +86,10 @@
       "Action": [
         "sts:AssumeRole"
       ],
-      "Resource": "arn:aws:iam::*:role/NetworkReadOnlyRole"
+      "Resource": [
+        "arn:aws:iam::REPLACE_WITH_SPOKE_ACCOUNT_ID_1:role/NetworkReadOnlyRole",
+        "arn:aws:iam::REPLACE_WITH_SPOKE_ACCOUNT_ID_2:role/NetworkReadOnlyRole"
+      ]
     },
     {
       "Sid": "DxVisualizerRegionNames",

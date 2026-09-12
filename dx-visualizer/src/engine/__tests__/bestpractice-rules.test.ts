@@ -737,6 +737,19 @@ describe('ruleVpcNoHybridRoute', () => {
 describe('ruleDxgwPropagationEnabled', () => {
   const transitVif = () =>
     ({ virtualInterfaceId: 'v-t', virtualInterfaceName: 'v-t', virtualInterfaceType: 'transit', bgpPeers: [], tags: {} }) as any;
+  const attachDxgw = (t: ReturnType<typeof makeEmptyTopology>, tgwId = 'tgw-1') => {
+    t.dxGatewayAssociations = [{
+      directConnectGatewayId: 'dxgw-1',
+      associatedGateway: {
+        id: tgwId,
+        type: 'transitGateway',
+        region: 'us-east-1',
+        ownerAccount: '111111111111',
+      },
+      associationState: 'associated',
+      allowedPrefixes: [],
+    }];
+  };
 
   const table = (id: string, propagations?: unknown) =>
     ({
@@ -761,6 +774,7 @@ describe('ruleDxgwPropagationEnabled', () => {
   it('stays silent when propagations were never fetched (permission or opt-out)', () => {
     const t = makeEmptyTopology();
     t.virtualInterfaces = [transitVif()];
+    attachDxgw(t);
     // undefined means "unknown" — must not be read as "nothing propagates".
     t.tgwRouteTables = new Map([['tgw-1', [table('tgw-rtb-1', undefined)]]]);
     expect(ruleDxgwPropagationEnabled(t).recommendation).toBeNull();
@@ -769,6 +783,7 @@ describe('ruleDxgwPropagationEnabled', () => {
   it('warns when no DX gateway attachment propagates into the table', () => {
     const t = makeEmptyTopology();
     t.virtualInterfaces = [transitVif()];
+    attachDxgw(t);
     t.tgwRouteTables = new Map([['tgw-1', [table('tgw-rtb-1', [
       { transitGatewayAttachmentId: 'tgw-attach-1', resourceId: 'vpc-1', resourceType: 'vpc', state: 'enabled' },
     ])]]]);
@@ -780,6 +795,7 @@ describe('ruleDxgwPropagationEnabled', () => {
   it('warns when DX propagation exists but is not yet enabled', () => {
     const t = makeEmptyTopology();
     t.virtualInterfaces = [transitVif()];
+    attachDxgw(t);
     t.tgwRouteTables = new Map([['tgw-1', [table('tgw-rtb-1', [
       { transitGatewayAttachmentId: 'tgw-attach-2', resourceId: 'dxgw-1', resourceType: 'direct-connect-gateway', state: 'enabling' },
     ])]]]);
@@ -791,12 +807,52 @@ describe('ruleDxgwPropagationEnabled', () => {
   it('confirms met when DX propagation is enabled', () => {
     const t = makeEmptyTopology();
     t.virtualInterfaces = [transitVif()];
+    attachDxgw(t);
     t.tgwRouteTables = new Map([['tgw-1', [table('tgw-rtb-1', [
       { transitGatewayAttachmentId: 'tgw-attach-2', resourceId: 'dxgw-1', resourceType: 'direct-connect-gateway', state: 'enabled' },
     ])]]]);
     const result = ruleDxgwPropagationEnabled(t);
     expect(result.recommendation!.ruleId).toBe('dxgw-propagation-ok');
     expect(result.recommendation!.severity).toBe('info');
+  });
+
+  it('ignores route tables on TGWs that have no DX gateway association', () => {
+    const t = makeEmptyTopology();
+    t.virtualInterfaces = [transitVif()];
+    attachDxgw(t, 'tgw-dx');
+    t.tgwRouteTables = new Map([
+      ['tgw-dx', [{
+        ...table('tgw-rtb-dx', [
+          { transitGatewayAttachmentId: 'tgw-attach-dx', resourceId: 'dxgw-1', resourceType: 'direct-connect-gateway', state: 'enabled' },
+        ]),
+        routeTable: {
+          ...table('tgw-rtb-dx').routeTable,
+          transitGatewayId: 'tgw-dx',
+        },
+      }]],
+      ['tgw-isolated', [{
+        ...table('tgw-rtb-isolated', []),
+        routeTable: {
+          ...table('tgw-rtb-isolated').routeTable,
+          transitGatewayId: 'tgw-isolated',
+        },
+      }]],
+    ] as any);
+
+    const result = ruleDxgwPropagationEnabled(t);
+    expect(result.recommendation!.ruleId).toBe('dxgw-propagation-ok');
+    expect(result.recommendation!.description).toContain('1 checked');
+    expect(result.recommendation!.description).not.toContain('tgw-rtb-isolated');
+  });
+
+  it('does not treat a disassociating TGW as actively attached', () => {
+    const t = makeEmptyTopology();
+    t.virtualInterfaces = [transitVif()];
+    attachDxgw(t);
+    t.dxGatewayAssociations[0].associationState = 'disassociating';
+    t.tgwRouteTables = new Map([['tgw-1', [table('tgw-rtb-1', [])]]]);
+
+    expect(ruleDxgwPropagationEnabled(t).recommendation).toBeNull();
   });
 });
 
@@ -940,6 +996,15 @@ describe('ruleDxPartnerDiversity', () => {
     expect(ruleDxPartnerDiversity(t).recommendation).toBeNull();
   });
 
+  it('stays silent when only one connection has observable partner metadata', () => {
+    const t = makeEmptyTopology();
+    t.connections = [
+      { connectionId: 'c1', partnerName: 'Equinix', tags: {} } as any,
+      { connectionId: 'hosted', isInferred: true, tags: {} } as any,
+    ];
+    expect(ruleDxPartnerDiversity(t).recommendation).toBeNull();
+  });
+
   it('fires when all connections share a partner', () => {
     const t = makeEmptyTopology();
     t.connections = [
@@ -949,6 +1014,20 @@ describe('ruleDxPartnerDiversity', () => {
     const result = ruleDxPartnerDiversity(t);
     expect(result.recommendation).not.toBeNull();
     expect(result.recommendation!.description).toContain('Equinix');
+  });
+
+  it('limits the concentration claim to connections with observable metadata', () => {
+    const t = makeEmptyTopology();
+    t.connections = [
+      { connectionId: 'c1', partnerName: 'Equinix', tags: {} } as any,
+      { connectionId: 'c2', partnerName: 'Equinix', tags: {} } as any,
+      { connectionId: 'hosted', isInferred: true, tags: {} } as any,
+    ];
+    const result = ruleDxPartnerDiversity(t);
+    expect(result.recommendation!.severity).toBe('info');
+    expect(result.recommendation!.description).toContain('All 2 connections with observable partner metadata');
+    expect(result.recommendation!.description).toContain('1 hosted connection');
+    expect(result.recommendation!.description).not.toContain('All 3');
   });
 
   it('names the real alternate providers at the occupied location', () => {

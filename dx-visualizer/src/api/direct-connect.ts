@@ -19,23 +19,62 @@ import type {
   DxGatewayAssociation,
   DxLocation,
   DxLag,
+  PrefixPool,
   VifRoute,
   VifRoutes,
   VifFailoverTest,
 } from '../types/aws-resources';
+import { drainPages } from './paginate';
+
+/**
+ * Page cap for every DX control-plane paginator below. These APIs return ~100
+ * records per page, and the largest real estates have single-digit pages of
+ * gateways, associations, proposals, or attachments — so 100 pages is orders of
+ * magnitude of headroom, and reaching it means the endpoint is malfunctioning
+ * rather than that the account is unusually large.
+ */
+const DX_MAX_PAGES = 100;
 
 // DescribeConnections, DescribeVirtualInterfaces and DescribeLags all paginate.
 // Reading only page 1 is worse than an error here: every resiliency rule counts
 // connections and VIFs per location, so a truncated list yields a confidently
 // *wrong* score rather than a visible failure. Follow nextToken like
 // fetchDxGateways does.
+/**
+ * Collapse the four flat `prefixPool*` members AWS returns into one object, or
+ * `undefined` when the API sent none of them.
+ *
+ * The distinction matters: these fields are documented as "not applicable to
+ * hosted connections or interconnects", and an account made entirely of
+ * partner-hosted ports gets nothing back. Returning `{}` would let a rule read
+ * `unallocatedIpv4 ?? 0` and report an exhausted pool on a port that never had
+ * one, so absence has to stay absent rather than becoming a zero.
+ */
+function prefixPool(src: {
+  prefixPoolSizeIpv4?: number;
+  prefixPoolSizeIpv6?: number;
+  prefixPoolUnallocatedCountIpv4?: number;
+  prefixPoolUnallocatedCountIpv6?: number;
+  prefixPoolAllocatedCountIpv4?: number;
+  prefixPoolAllocatedCountIpv6?: number;
+}): PrefixPool | undefined {
+  const pool: PrefixPool = {
+    sizeIpv4: src.prefixPoolSizeIpv4,
+    sizeIpv6: src.prefixPoolSizeIpv6,
+    unallocatedIpv4: src.prefixPoolUnallocatedCountIpv4,
+    unallocatedIpv6: src.prefixPoolUnallocatedCountIpv6,
+    allocatedIpv4: src.prefixPoolAllocatedCountIpv4,
+    allocatedIpv6: src.prefixPoolAllocatedCountIpv6,
+  };
+  return Object.values(pool).some((v) => v !== undefined) ? pool : undefined;
+}
+
 export async function fetchConnections(client: DirectConnectClient): Promise<DxConnection[]> {
-  const out: DxConnection[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new DescribeConnectionsCommand({ nextToken }));
-    for (const c of res.connections ?? []) {
-      out.push({
+  return drainPages<DxConnection>(
+    'DX connections',
+    async (nextToken) => {
+      const res = await client.send(new DescribeConnectionsCommand({ nextToken }));
+      const items = (res.connections ?? []).map((c) => ({
         connectionId: c.connectionId ?? '',
         connectionName: c.connectionName ?? '',
         connectionState: c.connectionState ?? '',
@@ -49,20 +88,22 @@ export async function fetchConnections(client: DirectConnectClient): Promise<DxC
         awsDeviceV2: c.awsDeviceV2,
         awsLogicalDeviceId: c.awsLogicalDeviceId,
         rateLimiterStatus: c.rateLimiterStatus,
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+        hasLogicalRedundancy: c.hasLogicalRedundancy,
+        jumboFrameCapable: c.jumboFrameCapable,
+        prefixPool: prefixPool(c),
+      }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 export async function fetchVirtualInterfaces(client: DirectConnectClient): Promise<DxVirtualInterface[]> {
-  const out: DxVirtualInterface[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new DescribeVirtualInterfacesCommand({ nextToken }));
-    for (const v of res.virtualInterfaces ?? []) {
-      out.push({
+  return drainPages<DxVirtualInterface>(
+    'virtual interfaces',
+    async (nextToken) => {
+      const res = await client.send(new DescribeVirtualInterfacesCommand({ nextToken }));
+      const items = (res.virtualInterfaces ?? []).map((v) => ({
         virtualInterfaceId: v.virtualInterfaceId ?? '',
         virtualInterfaceName: v.virtualInterfaceName ?? '',
         virtualInterfaceType: (v.virtualInterfaceType ?? 'private') as 'private' | 'public' | 'transit',
@@ -72,6 +113,7 @@ export async function fetchVirtualInterfaces(client: DirectConnectClient): Promi
         virtualGatewayId: v.virtualGatewayId,
         vlan: v.vlan ?? 0,
         asn: v.asn ?? 0,
+        addressFamily: v.addressFamily,
         bgpPeers: (v.bgpPeers ?? []).map((p) => ({
           bgpPeerId: p.bgpPeerId ?? '',
           bgpPeerState: p.bgpPeerState ?? '',
@@ -79,6 +121,10 @@ export async function fetchVirtualInterfaces(client: DirectConnectClient): Promi
           asn: p.asn ?? 0,
           customerAddress: p.customerAddress ?? '',
           amazonAddress: p.amazonAddress ?? '',
+          // Presence only. `authKey` is the live MD5 secret; capturing the value
+          // would put it in the store, every snapshot export, and the Bedrock
+          // context. A boolean answers the only question a rule asks of it.
+          hasAuthKey: (v.authKey ?? '') !== '',
         })),
         region: v.region ?? '',
         location: v.location,
@@ -86,35 +132,38 @@ export async function fetchVirtualInterfaces(client: DirectConnectClient): Promi
         awsDeviceV2: v.awsDeviceV2,
         awsLogicalDeviceId: v.awsLogicalDeviceId,
         rateLimit: v.rateLimit,
+        mtu: v.mtu,
+        jumboFrameCapable: v.jumboFrameCapable,
+        siteLinkEnabled: v.siteLinkEnabled,
+        prefixPool: prefixPool(v),
         // Public-VIF prefix allowlist. Previously declared on the type but only
         // ever populated by mock-data, so any rule reading it passed its tests
         // and silently no-opped against live accounts.
         routeFilterPrefixes: v.routeFilterPrefixes
           ?.map((p) => ({ cidr: p.cidr ?? '' }))
           .filter((p) => p.cidr !== ''),
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+      }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 export async function fetchDxGateways(client: DirectConnectClient): Promise<DxGateway[]> {
-  const out: DxGateway[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new DescribeDirectConnectGatewaysCommand({ nextToken }));
-    for (const g of res.directConnectGateways ?? []) {
-      out.push({
+  return drainPages<DxGateway>(
+    'DX gateways',
+    async (nextToken) => {
+      const res = await client.send(new DescribeDirectConnectGatewaysCommand({ nextToken }));
+      const items = (res.directConnectGateways ?? []).map((g) => ({
         directConnectGatewayId: g.directConnectGatewayId ?? '',
         directConnectGatewayName: g.directConnectGatewayName ?? '',
         amazonSideAsn: Number(g.amazonSideAsn ?? 0),
         directConnectGatewayState: g.directConnectGatewayState ?? '',
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+      }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 type ProposalBackfill = {
@@ -134,83 +183,94 @@ async function fetchProposalBackfills(
   client: DirectConnectClient,
   gatewayId: string
 ): Promise<ProposalBackfill[]> {
-  const out: ProposalBackfill[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(
-      new DescribeDirectConnectGatewayAssociationProposalsCommand({
-        directConnectGatewayId: gatewayId,
-        nextToken,
-      })
-    );
-    for (const p of res.directConnectGatewayAssociationProposals ?? []) {
-      if (p.proposalState !== 'accepted') continue;
-      const g = p.associatedGateway;
-      if (!g?.id) continue;
-      out.push({
-        id: g.id,
-        type: g.type as 'virtualPrivateGateway' | 'transitGateway' | undefined,
-        region: g.region ?? '',
-        ownerAccount: g.ownerAccount ?? '',
-        allowedPrefixes: (p.requestedAllowedPrefixesToDirectConnectGateway
-          ?? p.existingAllowedPrefixesToDirectConnectGateway
-          ?? []).map((r) => r.cidr ?? '').filter(Boolean),
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+  return drainPages<ProposalBackfill>(
+    `DX gateway association proposals (${gatewayId})`,
+    async (nextToken) => {
+      const res = await client.send(
+        new DescribeDirectConnectGatewayAssociationProposalsCommand({
+          directConnectGatewayId: gatewayId,
+          nextToken,
+        })
+      );
+      const items: ProposalBackfill[] = [];
+      for (const p of res.directConnectGatewayAssociationProposals ?? []) {
+        if (p.proposalState !== 'accepted') continue;
+        const g = p.associatedGateway;
+        if (!g?.id) continue;
+        items.push({
+          id: g.id,
+          type: g.type as 'virtualPrivateGateway' | 'transitGateway' | undefined,
+          region: g.region ?? '',
+          ownerAccount: g.ownerAccount ?? '',
+          allowedPrefixes: (p.requestedAllowedPrefixesToDirectConnectGateway
+            ?? p.existingAllowedPrefixesToDirectConnectGateway
+            ?? []).map((r) => r.cidr ?? '').filter(Boolean),
+        });
+      }
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 export async function fetchDxGatewayAssociations(
   client: DirectConnectClient,
   gatewayId: string
 ): Promise<DxGatewayAssociation[]> {
-  const mapped: DxGatewayAssociation[] = [];
   const stubIndices: number[] = [];
-  let nextToken: string | undefined;
+  // `drainPages` owns the accumulator, so track how many records earlier pages
+  // already contributed: a stub's index in the flat result is that running
+  // total plus its offset within the current page. The page counter is kept
+  // only to preserve the pagination log line below.
+  let emitted = 0;
   let pages = 0;
-  do {
-    const res = await client.send(
-      new DescribeDirectConnectGatewayAssociationsCommand({
-        directConnectGatewayId: gatewayId,
-        nextToken,
-      })
-    );
-    const raw = res.directConnectGatewayAssociations ?? [];
-    for (const a of raw) {
-      const hasCoreNetwork = !!a.associatedCoreNetwork?.id;
-      // Cloud WAN associations populate `associatedCoreNetwork` instead of
-      // `associatedGateway`, so a missing gateway id here is expected — don't
-      // treat them as stubs to backfill from proposals.
-      const isStub = !hasCoreNetwork && (!a.associatedGateway?.id || !a.associatedGateway?.type);
-      if (isStub) stubIndices.push(mapped.length);
-      mapped.push({
-        directConnectGatewayId: a.directConnectGatewayId ?? '',
-        associationId: a.associationId,
-        associatedGateway: {
-          id: a.associatedGateway?.id ?? '',
-          type: a.associatedGateway?.type as
-            | 'virtualPrivateGateway'
-            | 'transitGateway'
-            | undefined,
-          region: a.associatedGateway?.region ?? '',
-          ownerAccount: a.associatedGateway?.ownerAccount ?? '',
-        },
-        associatedCoreNetwork: hasCoreNetwork
-          ? {
-              id: a.associatedCoreNetwork?.id ?? '',
-              ownerAccount: a.associatedCoreNetwork?.ownerAccount ?? '',
-              attachmentId: a.associatedCoreNetwork?.attachmentId ?? '',
-            }
-          : undefined,
-        associationState: a.associationState ?? '',
-        allowedPrefixes: (a.allowedPrefixesToDirectConnectGateway ?? []).map((p) => p.cidr ?? '').filter(Boolean),
-      });
-    }
-    nextToken = res.nextToken;
-    pages++;
-  } while (nextToken);
+  const mapped = await drainPages<DxGatewayAssociation>(
+    `DX gateway associations (${gatewayId})`,
+    async (nextToken) => {
+      const res = await client.send(
+        new DescribeDirectConnectGatewayAssociationsCommand({
+          directConnectGatewayId: gatewayId,
+          nextToken,
+        })
+      );
+      const raw = res.directConnectGatewayAssociations ?? [];
+      const items: DxGatewayAssociation[] = [];
+      for (const a of raw) {
+        const hasCoreNetwork = !!a.associatedCoreNetwork?.id;
+        // Cloud WAN associations populate `associatedCoreNetwork` instead of
+        // `associatedGateway`, so a missing gateway id here is expected — don't
+        // treat them as stubs to backfill from proposals.
+        const isStub = !hasCoreNetwork && (!a.associatedGateway?.id || !a.associatedGateway?.type);
+        if (isStub) stubIndices.push(emitted + items.length);
+        items.push({
+          directConnectGatewayId: a.directConnectGatewayId ?? '',
+          associationId: a.associationId,
+          associatedGateway: {
+            id: a.associatedGateway?.id ?? '',
+            type: a.associatedGateway?.type as
+              | 'virtualPrivateGateway'
+              | 'transitGateway'
+              | undefined,
+            region: a.associatedGateway?.region ?? '',
+            ownerAccount: a.associatedGateway?.ownerAccount ?? '',
+          },
+          associatedCoreNetwork: hasCoreNetwork
+            ? {
+                id: a.associatedCoreNetwork?.id ?? '',
+                ownerAccount: a.associatedCoreNetwork?.ownerAccount ?? '',
+                attachmentId: a.associatedCoreNetwork?.attachmentId ?? '',
+              }
+            : undefined,
+          associationState: a.associationState ?? '',
+          allowedPrefixes: (a.allowedPrefixesToDirectConnectGateway ?? []).map((p) => p.cidr ?? '').filter(Boolean),
+        });
+      }
+      emitted += items.length;
+      pages++;
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
   if (pages > 1) {
     console.log(`[dx] DxGwAssoc(${gatewayId}) paginated: ${pages} pages, ${mapped.length} total`);
   }
@@ -271,12 +331,11 @@ export async function fetchLocations(client: DirectConnectClient): Promise<DxLoc
 }
 
 export async function fetchLags(client: DirectConnectClient): Promise<DxLag[]> {
-  const out: DxLag[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new DescribeLagsCommand({ nextToken }));
-    for (const l of res.lags ?? []) {
-      out.push({
+  return drainPages<DxLag>(
+    'LAGs',
+    async (nextToken) => {
+      const res = await client.send(new DescribeLagsCommand({ nextToken }));
+      const items = (res.lags ?? []).map((l) => ({
         lagId: l.lagId ?? '',
         lagName: l.lagName ?? '',
         connectionsBandwidth: l.connectionsBandwidth ?? '',
@@ -286,6 +345,7 @@ export async function fetchLags(client: DirectConnectClient): Promise<DxLag[]> {
         region: l.region ?? '',
         lagState: l.lagState ?? '',
         rateLimiterStatus: l.rateLimiterStatus,
+        prefixPool: prefixPool(l),
         connections: (l.connections ?? []).map((c) => ({
           connectionId: c.connectionId ?? '',
           connectionName: c.connectionName ?? '',
@@ -296,12 +356,17 @@ export async function fetchLags(client: DirectConnectClient): Promise<DxLag[]> {
           lagId: c.lagId,
           partnerName: c.partnerName,
           vlan: c.vlan,
+          awsDeviceV2: c.awsDeviceV2,
+          awsLogicalDeviceId: c.awsLogicalDeviceId,
+          hasLogicalRedundancy: c.hasLogicalRedundancy,
+          jumboFrameCapable: c.jumboFrameCapable,
+          prefixPool: prefixPool(c),
         })),
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+      }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 // Fetch the BGP routes for one direction on one VIF, following pagination.
@@ -311,38 +376,45 @@ async function fetchRoutesInDirection(
   vifId: string,
   direction: 'accepted' | 'advertised'
 ): Promise<VifRoute[]> {
-  const out: VifRoute[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(
-      new ListVirtualInterfaceRoutesCommand({
-        virtualInterfaceId: vifId,
-        filters: { routeDirection: direction as RouteDirection },
-        nextToken,
-      })
-    );
-    for (const r of res.routes ?? []) {
-      out.push({
-        cidr: r.cidr ?? '',
-        addressFamily: r.addressFamily as 'ipv4' | 'ipv6' | undefined,
-        asPath: (r.asPath ?? []).map((seg) => ({
-          pathType: seg.pathType as 'seq' | 'set' | undefined,
-          path: seg.path ?? [],
-        })),
-        communities: r.communities ?? [],
-        // Trust the filter we asked for — the service echoes routeDirection back,
-        // but defaulting to the requested direction keeps the union type honest
-        // if a route ever comes back without it.
-        routeDirection: (r.routeDirection as 'accepted' | 'advertised' | undefined) ?? direction,
-        routeInstalledAt: r.routeInstalledAt
-          ? new Date(r.routeInstalledAt).toISOString()
-          : undefined,
-        awsLogicalDeviceId: r.awsLogicalDeviceId,
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+  return drainPages<VifRoute>(
+    `${direction} routes on ${vifId}`,
+    async (nextToken) => {
+      const res = await client.send(
+        new ListVirtualInterfaceRoutesCommand({
+          virtualInterfaceId: vifId,
+          filters: { routeDirection: direction as RouteDirection },
+          nextToken,
+        })
+      );
+      const items = (res.routes ?? [])
+        // Trust the filter, but verify the echo. Everything downstream treats the
+        // `accepted` list as prefixes the customer router advertised — it is the
+        // numerator of every prefix-quota percentage — so one advertised route
+        // leaking in inflates that count with no visible symptom. When the service
+        // states a direction and it is not the one we asked for, drop the route
+        // rather than relabelling it.
+        .filter((r) => !r.routeDirection || r.routeDirection === direction)
+        .map((r) => ({
+          cidr: r.cidr ?? '',
+          addressFamily: r.addressFamily as 'ipv4' | 'ipv6' | undefined,
+          asPath: (r.asPath ?? []).map((seg) => ({
+            pathType: seg.pathType as 'seq' | 'set' | undefined,
+            path: seg.path ?? [],
+          })),
+          communities: r.communities ?? [],
+          // The service echoes routeDirection back, but defaulting to the
+          // requested direction keeps the union type honest if a route ever
+          // comes back without it.
+          routeDirection: (r.routeDirection as 'accepted' | 'advertised' | undefined) ?? direction,
+          routeInstalledAt: r.routeInstalledAt
+            ? new Date(r.routeInstalledAt).toISOString()
+            : undefined,
+          awsLogicalDeviceId: r.awsLogicalDeviceId,
+        }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 /**
@@ -380,17 +452,16 @@ export async function fetchVirtualInterfaceTestHistory(
   client: DirectConnectClient,
   vifId: string
 ): Promise<VifFailoverTest[]> {
-  const out: VifFailoverTest[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(
-      new ListVirtualInterfaceTestHistoryCommand({
-        virtualInterfaceId: vifId,
-        nextToken,
-      })
-    );
-    for (const h of res.virtualInterfaceTestHistory ?? []) {
-      out.push({
+  return drainPages<VifFailoverTest>(
+    `failover test history on ${vifId}`,
+    async (nextToken) => {
+      const res = await client.send(
+        new ListVirtualInterfaceTestHistoryCommand({
+          virtualInterfaceId: vifId,
+          nextToken,
+        })
+      );
+      const items = (res.virtualInterfaceTestHistory ?? []).map((h) => ({
         testId: h.testId ?? '',
         virtualInterfaceId: h.virtualInterfaceId ?? vifId,
         bgpPeers: h.bgpPeers ?? [],
@@ -399,30 +470,32 @@ export async function fetchVirtualInterfaceTestHistory(
         testDurationInMinutes: h.testDurationInMinutes,
         startTime: h.startTime ? new Date(h.startTime).toISOString() : undefined,
         endTime: h.endTime ? new Date(h.endTime).toISOString() : undefined,
-      });
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return out;
+      }));
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
 }
 
 export async function fetchDxGatewayAttachmentRegions(
   client: DirectConnectClient,
   gatewayId: string
 ): Promise<string[]> {
-  const regions = new Set<string>();
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(
-      new DescribeDirectConnectGatewayAttachmentsCommand({
-        directConnectGatewayId: gatewayId,
-        nextToken,
-      })
-    );
-    for (const att of res.directConnectGatewayAttachments ?? []) {
-      if (att.virtualInterfaceRegion) regions.add(att.virtualInterfaceRegion);
-    }
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return [...regions];
+  const regions = await drainPages<string>(
+    `DX gateway attachments (${gatewayId})`,
+    async (nextToken) => {
+      const res = await client.send(
+        new DescribeDirectConnectGatewayAttachmentsCommand({
+          directConnectGatewayId: gatewayId,
+          nextToken,
+        })
+      );
+      const items = (res.directConnectGatewayAttachments ?? [])
+        .map((att) => att.virtualInterfaceRegion)
+        .filter((r): r is string => !!r);
+      return { items, nextToken: res.nextToken };
+    },
+    { maxPages: DX_MAX_PAGES },
+  );
+  return [...new Set(regions)];
 }

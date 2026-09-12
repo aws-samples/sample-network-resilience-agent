@@ -66,13 +66,65 @@ export interface TopologyData {
   // ListVirtualInterfaceRoutes. Populated only when the user enables the
   // "BGP Routes" overlay — see loadVifRoutes() in the store.
   vifRoutes?: Map<string, VifRoutes>;
-  vifUtilization?: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>;
+  /**
+   * Peak throughput per VIF. `*BpsPeak` comes from `VirtualInterfaceBps*`, which is
+   * what the app fetches. `*UtilPctPeak` is AWS's own `VirtualInterfaceUtilization*`
+   * percentage and is populated only by producers that ask for it (the
+   * nwra-skill's CLI sweep): a partner-hosted VIF can publish the
+   * percentage while `Bps*` returns nothing at all, so without these fields such an
+   * account reads as entirely unmeasured. The percentage's denominator is AWS's, not
+   * ours, and the metric is undocumented — so it is reported, never graded.
+   */
+  vifUtilization?: Map<string, {
+    ingressBpsPeak?: number;
+    egressBpsPeak?: number;
+    ingressUtilPctPeak?: number;
+    egressUtilPctPeak?: number;
+  }>;
   connectionUtilization?: Map<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>;
   utilizationWindowDays?: 30 | 60 | 90;
   maintenanceEvents?: DxMaintenanceEvent[];
   homeAccountId?: string;
   regionNames?: Map<string, string>;
   publicVifResources?: PublicVifResource[];
+  /**
+   * Resources that failed to load, or loaded incompletely.
+   *
+   * This exists because a failed fetch used to be indistinguishable from an
+   * empty account. `logged()` in fetch-topology.ts catches, records, and
+   * returns `[]`, so an AccessDenied, a throttle, a network blip or a
+   * pagination cap all produced a topology that looked complete and correct.
+   *
+   * That is not merely "some data is missing". Several rules read absence as a
+   * pass: an empty `vpcRouteTables` means `ruleBlackholeRoutes` finds no
+   * blackholes and `ruleVpcNoHybridRoute` finds nothing missing, so a failed
+   * fetch could RAISE the resiliency score and hand back a green report on an
+   * estate with a real fault.
+   *
+   * Absent or empty means "nothing known to have failed". It is optional so
+   * snapshots taken before this existed still load.
+   */
+  fetchIssues?: FetchIssue[];
+}
+
+/** Severity of a partial-data problem, which decides how the banner reads. */
+export type FetchIssueKind =
+  /** The resource is missing entirely — the caller received `[]`. */
+  | 'failed'
+  /** Some data arrived, but a cap or limit stopped the rest. */
+  | 'truncated';
+
+export interface FetchIssue {
+  /**
+   * The `logged()` label, e.g. `ap-southeast-1/VpcRouteTables`. Kept verbatim
+   * rather than parsed into region + resource: the labels are not uniformly
+   * shaped (some carry an account id or a gateway suffix), and a half-working
+   * parser would drop the detail that makes the message actionable.
+   */
+  label: string;
+  kind: FetchIssueKind;
+  /** The underlying error text, already trimmed of stack. */
+  message: string;
 }
 
 export interface PublicVifResource {

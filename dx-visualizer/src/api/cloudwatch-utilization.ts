@@ -2,6 +2,7 @@ import { GetMetricDataCommand, ListMetricsCommand } from '@aws-sdk/client-cloudw
 import type { MetricDataQuery, Metric } from '@aws-sdk/client-cloudwatch';
 import type { AwsCredentials, DxConnection, DxVirtualInterface } from '../types/aws-resources';
 import { createCloudWatchClient } from './aws-client';
+import { drainPages } from './paginate';
 
 export type UtilizationWindowDays = 30 | 60 | 90;
 
@@ -32,6 +33,15 @@ const METRIC_NAMES = [
 // covers all supported windows. Granularity is intentionally coarse — this
 // view is for capacity planning, not troubleshooting.
 const PERIOD_SECONDS = 3600;
+
+/**
+ * Total ListMetrics pages allowed per region, deliberately SHARED across every
+ * entry in METRIC_NAMES rather than applied per metric name — a per-metric cap
+ * would still let a misbehaving endpoint drive METRIC_NAMES.length × cap calls.
+ * ListMetrics returns 500 metrics per page, so 500 pages covers 250k AWS/DX
+ * streams in one region.
+ */
+const MAX_LIST_METRICS_PAGES = 500;
 
 /**
  * Fetch peak hourly bitrate per VIF *and* per DX Connection from CloudWatch
@@ -102,36 +112,53 @@ export async function fetchUtilization(
       // connections); filter so we don't double-issue queries for it.
       const streams: Metric[] = [];
       const seenStreamKey = new Set<string>();
+      // One page budget for the WHOLE loop, not one per metric name: each
+      // drain is capped at whatever is left, and each page it fetches
+      // decrements the shared counter. So the total ListMetrics calls for this
+      // region can never exceed MAX_LIST_METRICS_PAGES however many metric
+      // names are listed.
+      let pageBudget = MAX_LIST_METRICS_PAGES;
       for (const metricName of METRIC_NAMES) {
-        let nextToken: string | undefined;
-        do {
-          const lm = await client.send(
-            new ListMetricsCommand({
-              Namespace: 'AWS/DX',
-              MetricName: metricName,
-              NextToken: nextToken,
-            }),
+        if (pageBudget <= 0) {
+          throw new Error(
+            `stopped paging ListMetrics for ${region} at the ${MAX_LIST_METRICS_PAGES}-page safety cap`,
           );
-          for (const m of lm.Metrics ?? []) {
-            const vifId = m.Dimensions?.find((d) => d.Name === 'VirtualInterfaceId')?.Value;
-            const connId = m.Dimensions?.find((d) => d.Name === 'ConnectionId')?.Value;
-            const matchesVif = vifId && wantedVifs.has(vifId);
-            const matchesConn = connId && wantedConns.has(connId);
-            if (!matchesVif && !matchesConn) continue;
-            // Dimensions uniquely identify a stream — fingerprint them so we
-            // don't add the same Metric twice if it shows up via separate
-            // pages or matches both filters.
-            const dimsKey = (m.Dimensions ?? [])
-              .map((d) => `${d.Name}=${d.Value}`)
-              .sort()
-              .join('|');
-            const key = `${m.MetricName}::${dimsKey}`;
-            if (seenStreamKey.has(key)) continue;
-            seenStreamKey.add(key);
-            streams.push(m);
-          }
-          nextToken = lm.NextToken;
-        } while (nextToken);
+        }
+        const found = await drainPages<Metric>(
+          `ListMetrics ${metricName} in ${region}`,
+          async (nextToken) => {
+            pageBudget--;
+            const lm = await client.send(
+              new ListMetricsCommand({
+                Namespace: 'AWS/DX',
+                MetricName: metricName,
+                NextToken: nextToken,
+              }),
+            );
+            const items: Metric[] = [];
+            for (const m of lm.Metrics ?? []) {
+              const vifId = m.Dimensions?.find((d) => d.Name === 'VirtualInterfaceId')?.Value;
+              const connId = m.Dimensions?.find((d) => d.Name === 'ConnectionId')?.Value;
+              const matchesVif = vifId && wantedVifs.has(vifId);
+              const matchesConn = connId && wantedConns.has(connId);
+              if (!matchesVif && !matchesConn) continue;
+              // Dimensions uniquely identify a stream — fingerprint them so we
+              // don't add the same Metric twice if it shows up via separate
+              // pages or matches both filters.
+              const dimsKey = (m.Dimensions ?? [])
+                .map((d) => `${d.Name}=${d.Value}`)
+                .sort()
+                .join('|');
+              const key = `${m.MetricName}::${dimsKey}`;
+              if (seenStreamKey.has(key)) continue;
+              seenStreamKey.add(key);
+              items.push(m);
+            }
+            return { items, nextToken: lm.NextToken };
+          },
+          { maxPages: pageBudget },
+        );
+        streams.push(...found);
       }
 
       if (streams.length === 0) {

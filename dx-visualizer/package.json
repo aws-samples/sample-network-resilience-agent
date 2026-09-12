@@ -1,7 +1,7 @@
 {
   "name": "dx-visualizer",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.1",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "package:devops-skill": "./skills/nwra-skill/devops-agent-skill/package.sh",
     "preview": "vite preview",
     "test": "vitest run"
   },
@@ -17,7 +18,7 @@
     "@aws-sdk/client-bedrock-runtime": "^3.1107.0",
     "@aws-sdk/client-cloudwatch": "^3.1107.0",
     "@aws-sdk/client-cost-explorer": "^3.1107.0",
-    "@aws-sdk/client-direct-connect": "^3.1107.0",
+    "@aws-sdk/client-direct-connect": "^3.1127.0",
     "@aws-sdk/client-ec2": "^3.1107.0",
     "@aws-sdk/client-health": "^3.1107.0",
     "@aws-sdk/client-iam": "^3.1107.0",

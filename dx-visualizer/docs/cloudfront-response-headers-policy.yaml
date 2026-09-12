@@ -1,0 +1,91 @@
+# Security response headers for a CloudFront-hosted build of this SPA.
+#
+# WHAT THIS IS
+#   A copyable AWS::CloudFront::ResponseHeadersPolicy. Paste the resource into the
+#   CloudFormation / CDK / SAM template that defines your distribution, or deploy this
+#   file on its own and reference the policy by ID. See Section 7 of docs/SETUP.md.
+#
+# IT DOES NOTHING UNTIL YOU ATTACH IT
+#   Creating the policy has no effect by itself. You must attach it to the cache
+#   behaviour that serves the SPA, e.g.:
+#
+#     MyDistribution:
+#       Type: AWS::CloudFront::Distribution
+#       Properties:
+#         DistributionConfig:
+#           DefaultCacheBehavior:
+#             ResponseHeadersPolicyId: !Ref SpaSecurityHeadersPolicy
+#             # ... TargetOriginId, ViewerProtocolPolicy, CachePolicyId, etc.
+#
+#   If you have additional behaviours (for example a separate path pattern), attach it
+#   to each of them too — a behaviour with no policy emits no headers.
+#
+# WHY THE SPA CANNOT DO THIS ITSELF
+#   dx-visualizer/index.html already carries a Content-Security-Policy in a
+#   <meta http-equiv> tag, but the CSP spec explicitly ignores `frame-ancestors`
+#   when the policy is delivered that way — it is honoured only in a real HTTP
+#   response header. The same is true of X-Frame-Options, which has no meta-tag form
+#   at all. Clickjacking defence therefore has to come from whatever serves dist/.
+#   That matters for this app in particular: it holds short-lived AWS credentials in
+#   browser memory, so an attacker-framed copy of the UI is a credential-path risk,
+#   not just a UI nuisance.
+#
+# NOT ON CLOUDFRONT?
+#   Set the equivalent headers in your web server (nginx `add_header`, Apache
+#   `Header always set`, Caddy `header`) or via your platform's headers config. The
+#   header names and values below are what matters; this file is just one way to emit
+#   them.
+#
+# NOTE ON THE CSP BELOW
+#   It sets `frame-ancestors` only, and deliberately does not restate the directives
+#   in index.html's meta CSP. Browsers enforce every delivered policy, so a header CSP
+#   and a meta CSP intersect rather than replace one another. If you would rather
+#   manage the whole policy in one place, move index.html's directives into the
+#   ContentSecurityPolicy value here — but keep `frame-ancestors 'none'`, and remember
+#   the SPA needs `connect-src` entries for the AWS API endpoints it calls.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Security response headers policy for the Network Resilience Agent SPA —
+  clickjacking, HSTS, MIME-sniffing, and referrer protections.
+
+Resources:
+  SpaSecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub ${AWS::StackName}-spa-security-headers
+        Comment: Security headers for the Network Resilience Agent SPA
+        SecurityHeadersConfig:
+          # Clickjacking defence. frame-ancestors is the modern control and is the
+          # reason this file exists — it cannot be delivered from the SPA's meta CSP.
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "frame-ancestors 'none'"
+            Override: true
+          # Legacy equivalent, for older browsers that do not implement
+          # frame-ancestors. Keep both.
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          # Force HTTPS for a year, subdomains included. Add `Preload: true` only if
+          # you intend to submit the domain to the HSTS preload list — that decision
+          # is hard to reverse, so it is left off here.
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Override: true
+          # X-Content-Type-Options: nosniff — CloudFront sets the value; there is no
+          # value property to configure.
+          ContentTypeOptions:
+            Override: true
+          # Do not leak the full URL to third-party origins.
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+
+Outputs:
+  ResponseHeadersPolicyId:
+    Description: >
+      Attach this ID to your distribution's cache behaviour as
+      ResponseHeadersPolicyId. The policy has no effect until you do.
+    Value: !Ref SpaSecurityHeadersPolicy

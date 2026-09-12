@@ -143,3 +143,65 @@ describe('no-DX VGW rendering (hasDxPresence escape)', () => {
     expect(nodes.find((n) => n.id === 'vgw-vgw-solo1')).toBeDefined();
   });
 });
+
+describe('mixed DX/VPN customer-site hosting', () => {
+  it('chooses a deterministic same-region DX site regardless of connection order', () => {
+    const makeTopology = (reverse: boolean) => {
+      const topo = makeEmptyTopology();
+      topo.homeAccountId = '111111111111';
+      topo.locations = [
+        { locationCode: 'OSA1', locationName: 'Osaka', region: 'ap-northeast-3', availablePortSpeeds: [] },
+        { locationCode: 'TYO1', locationName: 'Tokyo', region: 'ap-northeast-1', availablePortSpeeds: [] },
+      ];
+      const connections = [
+        {
+          connectionId: 'dxcon-osaka', connectionName: 'osaka', connectionState: 'available',
+          location: 'OSA1', bandwidth: '1Gbps', region: 'ap-northeast-3',
+        },
+        {
+          connectionId: 'dxcon-tokyo', connectionName: 'tokyo', connectionState: 'available',
+          location: 'TYO1', bandwidth: '1Gbps', region: 'ap-northeast-1',
+        },
+      ];
+      topo.connections = reverse ? connections.reverse() : connections;
+      topo.transitGateways = [{
+        transitGatewayId: 'tgw-tokyo',
+        transitGatewayArn: 'arn:aws:ec2:ap-northeast-1:111111111111:transit-gateway/tgw-tokyo',
+        state: 'available',
+        ownerId: '111111111111',
+        description: '',
+        amazonSideAsn: 64512,
+        tags: {},
+      }];
+      topo.customerGateways = [{
+        customerGatewayId: 'cgw-tokyo',
+        bgpAsn: '65000',
+        ipAddress: '203.0.113.10',
+        state: 'available',
+        type: 'ipsec.1',
+        tags: { Name: 'Tokyo VPN peer' },
+      }];
+      topo.vpnConnections = [{
+        vpnConnectionId: 'vpn-tokyo',
+        transitGatewayId: 'tgw-tokyo',
+        customerGatewayId: 'cgw-tokyo',
+        state: 'available',
+        type: 'ipsec.1',
+        category: 'VPN',
+        customerGatewayAddress: '203.0.113.10',
+        tunnels: [],
+        tags: {},
+      }];
+      return topo;
+    };
+
+    for (const reverse of [false, true]) {
+      const { nodes, edges } = buildGraph(makeTopology(reverse), new Set());
+      const router = nodes.find((node) => node.id === 'onprem-vpn-cgw-tokyo');
+      expect(router?.data.details?.hostSiteId).toBe('custsite-TYO1');
+
+      const laid = applyLayout(nodes, edges);
+      expect(laid.find((node) => node.id === 'onprem-vpn-cgw-tokyo')?.parentId).toBe('custsite-TYO1');
+    }
+  });
+});

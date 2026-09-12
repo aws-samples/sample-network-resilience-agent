@@ -3,12 +3,14 @@ import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useExportReport } from '../hooks/useExportReport';
+import { FullExportConfirmModal } from './FullExportConfirmModal';
 import { COLORS } from '../utils/colors';
 import type { Recommendation, DxGatewayAssessment, VgwAssessment, PublicVifAssessment } from '../types/recommendations';
 import type { TopologyData } from '../types/topology';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
 import { FOCUSED_PUBLIC_VIF, buildPublicVifScope } from '../engine/recommendation-engine';
 import { getLocationDeviceCounts } from '../engine/sla-gating';
+import { metaFor } from '../engine/rule-metadata';
 
 const tierColors: Record<string, string> = {
   none: COLORS.severity.critical,
@@ -500,6 +502,47 @@ function buildChecklist(
       detail: 'Create and maintain operational runbooks for Direct Connect and VPN failover procedures, including escalation paths, on-call rotations, and partner coordination steps. During an incident, a well-tested runbook turns failover from a multi-hour scramble into a repeatable procedure.',
       severity: 'info',
       group: 'operations',
+    });
+  }
+
+  // Rules that carry their own wording straight through to the panel.
+  //
+  // Every block above restates its rule's text in JSX, which is why six existing
+  // rules have no panel row at all — each one is a hand-written block somebody
+  // has to remember to add, and the report is the only place they surface. These
+  // rules are written to be read verbatim (the title is the finding, the
+  // description is the explanation and the fix), so forwarding them costs one
+  // table entry instead of a 10-line block, and adding a rule to this list is the
+  // whole change.
+  //
+  // Order in this array is the order they appear within their group. `group`
+  // comes from `metaFor()` rather than a second literal here: the report already
+  // files findings by that category, and two hand-maintained taxonomies for the
+  // same rule is how a row ends up under a different heading in the panel than in
+  // the exported document.
+  const PASS_THROUGH_RULES: readonly string[] = [
+    'shared-logical-device',
+    'logical-redundancy',
+    'logical-redundancy-ok',
+    'prefix-allocation-skew',
+    'prefix-pool-exhausted',
+    'prefix-churn',
+    'unused-dxgw',
+    'recent-aws-issue',
+  ];
+  for (const ruleId of PASS_THROUGH_RULES) {
+    const rec = recommendations.find((r) => r.ruleId === ruleId);
+    if (!rec) continue;
+    const meta = metaFor(ruleId);
+    bestPracticeChecklist.push({
+      label: rec.title,
+      // `-ok` rules are the attestation that a check passed, so they are the only
+      // ones that render as a green check. Everything else here is open work,
+      // including the `info` emissions — an idle gateway is still a row to read.
+      met: meta?.isPass === true,
+      detail: rec.description,
+      severity: rec.severity,
+      group: meta?.category ?? 'configuration',
     });
   }
 
@@ -1456,6 +1499,13 @@ export function ResiliencyScoreCard() {
   const setViewMode = useTopologyStore((s) => s.setViewMode);
   const [expanded, setExpanded] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [exportingReport, setExportingReport] = useState(false);
+  const [confirmUnredactedReport, setConfirmUnredactedReport] = useState(false);
+  // Redact mode decides whether the report masks identifiers; `useMock` decides
+  // whether there is anything real to mask. Both are read here rather than inside
+  // the hook because the hook cannot open a dialog.
+  const redactMode = useTopologyStore((s) => s.redactMode);
+  const useMock = useTopologyStore((s) => s.useMock);
   const fullscreenTrapRef = useFocusTrap(fullscreen, () => setFullscreen(false));
   const exportReport = useExportReport();
   if (!assessment) return null;
@@ -1478,13 +1528,35 @@ export function ResiliencyScoreCard() {
     return ay - by;
   });
 
-  const handleExportReport = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  // The export fetches BGP routes and CloudWatch utilization for the report when
+  // they aren't already loaded, so it is no longer instant — without a pending
+  // state the button looks dead for the seconds those calls take, and a second
+  // click would fire a duplicate fetch.
+  const runExportReport = async () => {
+    setExportingReport(true);
     try {
-      exportReport();
+      await exportReport();
     } catch (err) {
       console.error('Report export failed:', err);
+    } finally {
+      setExportingReport(false);
     }
+  };
+
+  // Same gate as the snapshot "Full data" export, for the same reason: with redact
+  // mode off the file carries real account IDs, resource IDs, IPs and CIDRs, and a
+  // report is the artifact most likely to be attached to an email. Mock scenarios
+  // skip it — there is nothing to leak, and a dialog on every demo export trains
+  // people to click through it. A sanitized import has redact mode forced on, so it
+  // takes the quiet path too.
+  const handleExportReport = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (exportingReport) return;
+    if (!redactMode && !useMock) {
+      setConfirmUnredactedReport(true);
+      return;
+    }
+    await runExportReport();
   };
 
   const globalRecs = [
@@ -1701,12 +1773,15 @@ export function ResiliencyScoreCard() {
                       : 'text-slate-300 hover:text-slate-100 hover:bg-slate-700'
                   }`}
                   onClick={handleExportReport}
-                  title="Download HTML resilience report"
+                  disabled={exportingReport}
+                  title={exportingReport
+                    ? 'Fetching BGP routes and CloudWatch utilization for the report'
+                    : 'Download HTML resilience report'}
                 >
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                   </svg>
-                  Download Report
+                  {exportingReport ? 'Preparing…' : 'Download Report'}
                 </button>
                 <button
                   className={`p-1.5 rounded-md transition-colors ${light ? 'hover:bg-gray-100 text-gray-500' : 'hover:bg-slate-700 text-slate-400'}`}
@@ -1798,12 +1873,22 @@ export function ResiliencyScoreCard() {
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'
                 }`}
                 onClick={handleExportReport}
-                title="Download HTML resilience report"
+                disabled={exportingReport}
+                title={exportingReport
+                  ? 'Fetching BGP routes and CloudWatch utilization for the report'
+                  : 'Download HTML resilience report'}
                 aria-label="Download HTML resilience report"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                </svg>
+                {exportingReport ? (
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth={2} strokeOpacity={0.25} />
+                    <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                )}
               </button>
               <button
                 className={`shrink-0 p-1.5 rounded-md transition-colors ${
@@ -1830,6 +1915,25 @@ export function ResiliencyScoreCard() {
           </div>
         )}
       </div>
+
+      {confirmUnredactedReport && (
+        <FullExportConfirmModal
+          title="Export an unredacted report?"
+          description="Redact mode is off, so the report will name your real resources. Turn on redact mode in the toolbar and export again to mask them instead."
+          contents={[
+            'AWS account IDs',
+            'Resource IDs (VIF, DXGW, TGW, VPC, etc.)',
+            'On-premises IPs and CIDR blocks from BGP routes',
+            'Resource names, descriptions, and tags',
+          ]}
+          confirmLabel="Export unredacted"
+          onCancel={() => setConfirmUnredactedReport(false)}
+          onConfirm={() => {
+            setConfirmUnredactedReport(false);
+            void runExportReport();
+          }}
+        />
+      )}
     </>
   );
 }

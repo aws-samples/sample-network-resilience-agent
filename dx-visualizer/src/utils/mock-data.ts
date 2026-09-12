@@ -249,6 +249,10 @@ export const noResiliencyTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'DxDXB1-1a2b3c4d',
       awsLogicalDeviceId: 'DxDXB1-lg1a',
+      prefixPool: { sizeIpv4: 64, unallocatedIpv4: 24, sizeIpv6: 8, unallocatedIpv6: 8 },
+      // AWS's verdict on the interconnect behind the only port this account has.
+      hasLogicalRedundancy: 'no',
+      jumboFrameCapable: false,
     },
   ],
   virtualInterfaces: [
@@ -261,6 +265,9 @@ export const noResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-001',
       vlan: 100,
       asn: 65000,
+      // 12 accepted against 40 allowed — comfortably inside its own ceiling, so
+      // the route-limit rule reports the allocation as the basis and stays green.
+      prefixPool: { allocatedIpv4: 40 },
       bgpPeers: [
         {
           bgpPeerId: 'bgp-001',
@@ -451,8 +458,12 @@ export const devTestTopology: TopologyData = {
     // Counts match the exact route lists below: dt01 accepts 25 /24s + a covering
     // /16 + a default route; dt02 accepts 20 /24s. dt02 is advertised nothing —
     // that's the asymmetry the scenario demos.
-    ['dxvif-dt01', { accepted: 27, advertised: 1 }],
+    // dt01 also carries a floor: the count moved between 19 and 27 inside the
+    // sampled window, which is what `ruleBgpPrefixChurn` grades. A single reading
+    // (the shape of every other entry here) leaves it silent.
+    ['dxvif-dt01', { accepted: 27, advertised: 1, acceptedFloor: 19, samples: 12 }],
     ['dxvif-dt02', { accepted: 20, advertised: 0 }],
+    ['dxvif-dt03', { accepted: 10, advertised: 1 }],
   ]),
   // Deliberately unhealthy history so the History button shows a finding in demo
   // mode: dt01 flapped repeatedly last week, and dt02 has never been failover-
@@ -460,6 +471,7 @@ export const devTestTopology: TopologyData = {
   bgpStability: new Map([
     ['dxvif-dt01', { flapCount: 6, downPeriods: 9, totalPeriods: 2016, windowDays: 7, lastFlapAt: '2026-08-08T19:20:00.000Z' }],
     ['dxvif-dt02', { flapCount: 0, downPeriods: 0, totalPeriods: 2016, windowDays: 7 }],
+    ['dxvif-dt03', { flapCount: 0, downPeriods: 0, totalPeriods: 2016, windowDays: 7 }],
   ]),
   vifFailoverTests: new Map([
     ['dxvif-dt01', [{
@@ -474,6 +486,7 @@ export const devTestTopology: TopologyData = {
       endTime: '2025-05-01T02:15:00.000Z',
     }]],
     ['dxvif-dt02', []],
+    ['dxvif-dt03', []],
   ]),
   // Deliberately unhealthy so the route-hygiene rules are demonstrable in demo
   // mode. Both VIFs share dxgw-dt01, so they're redundant peers that SHOULD
@@ -502,10 +515,16 @@ export const devTestTopology: TopologyData = {
       mockAcceptedRoutes(20, 30, 65000),
       mockAdvertisedRoutes([]),
     )],
+    // dt03 serves the staging routing domain, so its prefixes are its own.
+    ['dxvif-dt03', vifRoutesEntry(
+      mockAcceptedRoutes(10, 31, 65000),
+      mockAdvertisedRoutes(['10.1.0.0/16']),
+    )],
   ]),
   vifUtilization: new Map([
     ['dxvif-dt01', { ingressBpsPeak: 95e6, egressBpsPeak: 310e6 }],
     ['dxvif-dt02', { ingressBpsPeak: 88e6, egressBpsPeak: 290e6 }],
+    ['dxvif-dt03', { ingressBpsPeak: 12e6, egressBpsPeak: 40e6 }],
   ]),
   connectionUtilization: new Map([
     ['dxcon-dt001', { ingressBpsPeak: 110e6, egressBpsPeak: 330e6 }],
@@ -531,6 +550,13 @@ export const devTestTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'DxDXB1-1a2b3c4d',
       awsLogicalDeviceId: 'DxDXB1-lg1a',
+      // Pool fully handed out to the two VIFs on this port: a third VIF could not
+      // be given an allocation, and dt02's cannot be widened, without taking
+      // capacity back from another. `unallocated === 0` is the only evidence of
+      // that — an absent pool is unknown, which is why dt002 below reports one too.
+      prefixPool: { sizeIpv4: 64, unallocatedIpv4: 0, sizeIpv6: 8, unallocatedIpv6: 8 },
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
     },
     {
       connectionId: 'dxcon-dt002',
@@ -542,6 +568,12 @@ export const devTestTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'DxDXB1-5e6f7g8h',
       awsLogicalDeviceId: 'DxDXB1-lg1b',
+      prefixPool: { sizeIpv4: 64, unallocatedIpv4: 40, sizeIpv6: 8, unallocatedIpv6: 8 },
+      // AWS's own verdict on the interconnect behind this port. Not derivable from
+      // the topology, and the reason the backup path is weaker than its device and
+      // location counts suggest.
+      hasLogicalRedundancy: 'no',
+      jumboFrameCapable: true,
     },
   ],
   virtualInterfaces: [
@@ -558,8 +590,14 @@ export const devTestTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-dt01',
       vlan: 100,
       asn: 65000,
+      mtu: 1500,
+      jumboFrameCapable: true,
+      // 40 of dxcon-dt001's 64-prefix pool. Its sibling dt02 draws only 24 from
+      // the other port, and that difference — not the quota — is what tears the
+      // backup session down first when on-premises grows.
+      prefixPool: { allocatedIpv4: 40 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-dt01', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.0.2/30', amazonAddress: '169.254.0.1/30' },
+        { bgpPeerId: 'bgp-dt01', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.0.2/30', amazonAddress: '169.254.0.1/30', hasAuthKey: true },
       ],
       region: 'me-south-1',
       awsDeviceV2: 'DxDXB1-1a2b3c4d',
@@ -574,12 +612,39 @@ export const devTestTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-dt01',
       vlan: 200,
       asn: 65000,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // 20 accepted against 24 allowed = 83%, the shape a fixed /100 denominator
+      // hides completely (it reads as 20%).
+      prefixPool: { allocatedIpv4: 24 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-dt02', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.1.2/30', amazonAddress: '169.254.1.1/30' },
+        { bgpPeerId: 'bgp-dt02', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.1.2/30', amazonAddress: '169.254.1.1/30', hasAuthKey: false },
       ],
       region: 'me-south-1',
       awsDeviceV2: 'DxDXB1-5e6f7g8h',
       awsLogicalDeviceId: 'DxDXB1-lg1b',
+    },
+    {
+      // Staging's only path, and it rides the SAME logical device as production's
+      // primary. Each gateway is adequately graded on its own; the shared device is
+      // visible only across the estate, and losing it leaves dxgw-dt02 with nothing.
+      virtualInterfaceId: 'dxvif-dt03',
+      virtualInterfaceName: 'Private-VIF-Staging',
+      virtualInterfaceType: 'private',
+      virtualInterfaceState: 'available',
+      connectionId: 'dxcon-dt001',
+      directConnectGatewayId: 'dxgw-dt02',
+      vlan: 300,
+      asn: 65000,
+      mtu: 1500,
+      jumboFrameCapable: true,
+      prefixPool: { allocatedIpv4: 24 },
+      bgpPeers: [
+        { bgpPeerId: 'bgp-dt03', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.2.2/30', amazonAddress: '169.254.2.1/30', hasAuthKey: false },
+      ],
+      region: 'me-south-1',
+      awsDeviceV2: 'DxDXB1-1a2b3c4d',
+      awsLogicalDeviceId: 'DxDXB1-lg1a',
     },
   ],
   dxGateways: [
@@ -587,6 +652,12 @@ export const devTestTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-dt01',
       directConnectGatewayName: 'DX-Gateway-Dubai-to-SG',
       amazonSideAsn: 64512,
+      directConnectGatewayState: 'available',
+    },
+    {
+      directConnectGatewayId: 'dxgw-dt02',
+      directConnectGatewayName: 'DX-Gateway-Dubai-Staging',
+      amazonSideAsn: 64513,
       directConnectGatewayState: 'available',
     },
   ],
@@ -603,6 +674,17 @@ export const devTestTopology: TopologyData = {
       // VGW association → filter only; vpc-dt01's CIDR is what reaches on-prem.
       allowedPrefixes: ['10.0.0.0/16'],
     },
+    {
+      directConnectGatewayId: 'dxgw-dt02',
+      associatedGateway: {
+        id: 'vgw-dt02',
+        type: 'virtualPrivateGateway',
+        region: 'ap-southeast-1',
+        ownerAccount: '123456789012',
+      },
+      associationState: 'associated',
+      allowedPrefixes: ['10.1.0.0/16'],
+    },
   ],
   lags: [],
   vpcs: [
@@ -617,6 +699,14 @@ export const devTestTopology: TopologyData = {
       amazonSideAsn: 64512,
       state: 'available',
       tags: { Name: 'vgw-dx-prod' },
+    },
+    {
+      vpnGatewayId: 'vgw-dt02',
+      vpcAttachments: [{ vpcId: 'vpc-dt02', state: 'attached' }],
+      type: 'ipsec.1',
+      amazonSideAsn: 64513,
+      state: 'available',
+      tags: { Name: 'vgw-dx-staging' },
     },
   ],
   vpnConnections: [],
@@ -709,6 +799,7 @@ function mockUpcomingMaintenance(
     endTime: end.toISOString(),
     statusCode: 'upcoming',
     eventTypeCategory: 'scheduledChange',
+    eventScopeCode: 'ACCOUNT_SPECIFIC',
     affectedResourceIds: [...scheduled.connectionIds, ...scheduled.vifIds],
     accountId: '123456789012',
     // No inline resource-ID list, deliberately: the real PHD description does not
@@ -735,6 +826,9 @@ If you encounter any problems with your connection after the end of this mainten
     endTime: issueEnd.toISOString(),
     statusCode: 'closed',
     eventTypeCategory: 'issue',
+    // AWS asserts THIS account was hit — the scope `ruleRecentAwsIssue` grades on,
+    // and the one the calendar never filters as off-footprint.
+    eventScopeCode: 'ACCOUNT_SPECIFIC',
     affectedResourceIds: [...issue.connectionIds, ...issue.vifIds],
     accountId: '123456789012',
     description: `AWS Direct Connect Operational Issue [AWS Account: 123456789012]  Between ${issueStart.toUTCString()} and ${issueEnd.toUTCString()} we experienced elevated packet loss affecting a subset of AWS Direct Connect connections in the Singapore region. Connectivity has been restored and the issue is resolved. Redundant connections were unaffected for the duration of the event.`,
@@ -836,6 +930,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-1a2b3c4d',
       awsLogicalDeviceId: 'EqSG2-lg1a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high01',
     },
     {
@@ -848,6 +944,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-1a2b3c4d',
       awsLogicalDeviceId: 'EqSG2-lg1a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high01',
     },
     {
@@ -860,6 +958,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-1a2b3c4d',
       awsLogicalDeviceId: 'EqSG2-lg1a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high01',
     },
     {
@@ -872,6 +972,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-1a2b3c4d',
       awsLogicalDeviceId: 'EqSG2-lg1a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high01',
     },
     {
@@ -884,6 +986,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'EqSG3-9i0j1k2l',
       awsLogicalDeviceId: 'EqSG3-lg2a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high02',
     },
     {
@@ -896,6 +1000,8 @@ export const highResiliencyTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'EqSG3-9i0j1k2l',
       awsLogicalDeviceId: 'EqSG3-lg2a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
       lagId: 'dxlag-high02',
     },
   ],
@@ -909,8 +1015,13 @@ export const highResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-high01',
       vlan: 100,
       asn: 65000,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Equal across all four siblings, so the weakest-allocation rule stays
+      // quiet — the healthy counterpart to devTest's 40-vs-24 split.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-h01', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.0.2/30', amazonAddress: '169.254.0.1/30' },
+        { bgpPeerId: 'bgp-h01', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.0.2/30', amazonAddress: '169.254.0.1/30', hasAuthKey: true },
       ],
       region: 'ap-southeast-1',
       awsDeviceV2: 'EqSG2-1a2b3c4d',
@@ -925,8 +1036,13 @@ export const highResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-high01',
       vlan: 300,
       asn: 65000,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Equal across all four siblings, so the weakest-allocation rule stays
+      // quiet — the healthy counterpart to devTest's 40-vs-24 split.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-h03', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.2.2/30', amazonAddress: '169.254.2.1/30' },
+        { bgpPeerId: 'bgp-h03', bgpPeerState: 'available', bgpStatus: 'up', asn: 65000, customerAddress: '169.254.2.2/30', amazonAddress: '169.254.2.1/30', hasAuthKey: true },
       ],
       region: 'ap-southeast-1',
       awsDeviceV2: 'EqSG2-1a2b3c4d',
@@ -941,8 +1057,13 @@ export const highResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-high01',
       vlan: 200,
       asn: 65001,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Equal across all four siblings, so the weakest-allocation rule stays
+      // quiet — the healthy counterpart to devTest's 40-vs-24 split.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-h02', bgpPeerState: 'available', bgpStatus: 'up', asn: 65001, customerAddress: '169.254.1.2/30', amazonAddress: '169.254.1.1/30' },
+        { bgpPeerId: 'bgp-h02', bgpPeerState: 'available', bgpStatus: 'up', asn: 65001, customerAddress: '169.254.1.2/30', amazonAddress: '169.254.1.1/30', hasAuthKey: true },
       ],
       region: 'ap-southeast-1',
       awsDeviceV2: 'EqSG3-9i0j1k2l',
@@ -957,8 +1078,13 @@ export const highResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-high01',
       vlan: 400,
       asn: 65001,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Equal across all four siblings, so the weakest-allocation rule stays
+      // quiet — the healthy counterpart to devTest's 40-vs-24 split.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
-        { bgpPeerId: 'bgp-h04', bgpPeerState: 'available', bgpStatus: 'up', asn: 65001, customerAddress: '169.254.3.2/30', amazonAddress: '169.254.3.1/30' },
+        { bgpPeerId: 'bgp-h04', bgpPeerState: 'available', bgpStatus: 'up', asn: 65001, customerAddress: '169.254.3.2/30', amazonAddress: '169.254.3.1/30', hasAuthKey: true },
       ],
       region: 'ap-southeast-1',
       awsDeviceV2: 'EqSG3-9i0j1k2l',
@@ -1268,6 +1394,8 @@ export const maximumResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-1a2b3c4d',
       awsLogicalDeviceId: 'EqSG2-lg1a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
     },
     {
       connectionId: 'dxcon-abc002',
@@ -1279,6 +1407,8 @@ export const maximumResiliencyTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqSG2-5e6f7g8h',
       awsLogicalDeviceId: 'EqSG2-lg1b',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
     },
     {
       connectionId: 'dxcon-abc003',
@@ -1290,6 +1420,8 @@ export const maximumResiliencyTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'EqSG3-9i0j1k2l',
       awsLogicalDeviceId: 'EqSG3-lg2a',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
     },
     {
       connectionId: 'dxcon-abc004',
@@ -1301,6 +1433,8 @@ export const maximumResiliencyTopology: TopologyData = {
       hasBfd: false,
       awsDeviceV2: 'EqSG3-3m4n5o6p',
       awsLogicalDeviceId: 'EqSG3-lg2b',
+      hasLogicalRedundancy: 'yes',
+      jumboFrameCapable: true,
     },
   ],
   virtualInterfaces: [
@@ -1313,6 +1447,11 @@ export const maximumResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-001',
       vlan: 100,
       asn: 65000,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Identical ceilings on all four paths: any one can absorb what the
+      // others carry, which is the point of the tier.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
         {
           bgpPeerId: 'bgp-001',
@@ -1321,6 +1460,7 @@ export const maximumResiliencyTopology: TopologyData = {
           asn: 65000,
           customerAddress: '169.254.0.2/30',
           amazonAddress: '169.254.0.1/30',
+          hasAuthKey: true,
         },
       ],
       region: 'ap-southeast-1',
@@ -1336,6 +1476,11 @@ export const maximumResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-001',
       vlan: 200,
       asn: 65000,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Identical ceilings on all four paths: any one can absorb what the
+      // others carry, which is the point of the tier.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
         {
           bgpPeerId: 'bgp-002',
@@ -1344,6 +1489,7 @@ export const maximumResiliencyTopology: TopologyData = {
           asn: 65000,
           customerAddress: '169.254.1.2/30',
           amazonAddress: '169.254.1.1/30',
+          hasAuthKey: true,
         },
       ],
       region: 'ap-southeast-1',
@@ -1359,6 +1505,11 @@ export const maximumResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-001',
       vlan: 300,
       asn: 65001,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Identical ceilings on all four paths: any one can absorb what the
+      // others carry, which is the point of the tier.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
         {
           bgpPeerId: 'bgp-003',
@@ -1367,6 +1518,7 @@ export const maximumResiliencyTopology: TopologyData = {
           asn: 65001,
           customerAddress: '169.254.2.2/30',
           amazonAddress: '169.254.2.1/30',
+          hasAuthKey: true,
         },
       ],
       region: 'ap-southeast-1',
@@ -1382,6 +1534,11 @@ export const maximumResiliencyTopology: TopologyData = {
       directConnectGatewayId: 'dxgw-001',
       vlan: 400,
       asn: 65001,
+      mtu: 9001,
+      jumboFrameCapable: true,
+      // Identical ceilings on all four paths: any one can absorb what the
+      // others carry, which is the point of the tier.
+      prefixPool: { allocatedIpv4: 100 },
       bgpPeers: [
         {
           bgpPeerId: 'bgp-004',
@@ -1390,6 +1547,7 @@ export const maximumResiliencyTopology: TopologyData = {
           asn: 65001,
           customerAddress: '169.254.3.2/30',
           amazonAddress: '169.254.3.1/30',
+          hasAuthKey: true,
         },
       ],
       region: 'ap-southeast-1',

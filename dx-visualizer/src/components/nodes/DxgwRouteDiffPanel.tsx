@@ -28,10 +28,10 @@ const CELL_PAD = 8;
 const HEADER_CH_W = 4.6;
 const PREFIX_HEADER = 'Prefix';
 const INDEX_HEADER = '#';
-// One matrix cell holds a check, a tilde, a half-circle, or a dot — one glyph
-// plus breathing room. Sized for the column NUMBER above it rather than the
-// glyph: those numbers tie a column to a tab, so they have to stay legible at
-// zoom < 1.
+// One matrix cell holds one of ✓ ○ △ × — a single glyph plus breathing room, and
+// all four are one monospace cell wide so the column stays square whichever lands
+// in it. Sized for the column NUMBER above it rather than the glyph: those numbers
+// tie a column to a tab, so they have to stay legible at zoom < 1.
 const CELL_W = 24;
 const MARK_GAP = 3;
 // Space reserved inside the prefix column for a shared-fate chip (`⚡ 1 device`).
@@ -288,7 +288,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   );
 
   // Gateway-wide rows keyed by prefix — used to render out-of-scope columns with
-  // that VIF's real relationship to the prefix (dimmed), rather than a bare "·"
+  // that VIF's real relationship to the prefix (dimmed), rather than a bare "×"
   // that would falsely read as "cannot reach". `activeDiff` rows only carry cells
   // for in-scope VIFs when narrowed.
   const gatewayRowByCidr = useMemo(() => {
@@ -390,6 +390,20 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   const warnColor = light ? '#b45309' : '#fcd34d';
   const dangerColor = light ? '#b91c1c' : '#f87171';
   const okColor = light ? '#15803d' : '#4ade80';
+  // The two matrix-mark colours that are NOT severities, named so the cells and the
+  // legend below cannot drift — they did: the legend drew `not reachable` in
+  // dangerColor while the cell drew it grey, so the key disagreed with the grid it
+  // was explaining. `covered` is deliberately neutral body-text rather than amber:
+  // a prefix reachable via a less specific route needs no change window, and the
+  // exported report makes the same call (see `.mark-covered` in useExportReport).
+  const coveredColor = light ? '#334155' : '#cbd5e1';
+  // These were `light ? '#cbd5e1' : '#475569'` — the pair the wrong way round, so the
+  // mark was near-invisible in BOTH themes: #cbd5e1 is a light grey sitting on the
+  // light panel's white, #475569 a dark grey on the dark panel's #1e293b. Now the same
+  // two values the report resolves `var(--muted)` to, which are the right way up and
+  // legible on either background. Quiet is the intent — absent is not on its own a
+  // fault, the row verdict decides that — but quiet still has to be readable.
+  const absentColor = light ? '#64748b' : '#94a3b8';
 
   const totalGaps = activeDiff.totalSolo + activeDiff.totalPartial;
 
@@ -817,12 +831,12 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
               ? <>{'on '}<strong>{r(selectedVif.label)}</strong>{' cannot be reached from any other VIF'}</>
               : 'on this gateway sit on a single VIF with no other path'}
             {'. If that VIF drops, the traffic has nowhere to go.'}
-            {shownPartial > 0 && ` A further ${shownPartial} ${shownPartial === 1 ? 'is' : 'are'} only partly carried elsewhere (◐).`}
+            {shownPartial > 0 && ` A further ${shownPartial} ${shownPartial === 1 ? 'is' : 'are'} only partly carried elsewhere (△).`}
           </>
         ) : shownPartial > 0 ? (
           <>
             <strong>{shownPartial}</strong>
-            {` of ${visible.length} prefix${visible.length === 1 ? '' : 'es'} ${shownPartial === 1 ? 'is' : 'are'} only partly carried by another VIF (◐)`}
+            {` of ${visible.length} prefix${visible.length === 1 ? '' : 'es'} ${shownPartial === 1 ? 'is' : 'are'} only partly carried by another VIF (△)`}
             {selectedVif ? <>{' from '}<strong>{r(selectedVif.label)}</strong></> : ''}
             {'. Addresses outside the pieces a sibling carries lose their path.'}
           </>
@@ -1034,18 +1048,23 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                     // In-scope cells come from the active (possibly narrowed)
                     // comparison. Out-of-scope columns aren't graded here, so read
                     // their relationship to this prefix from the gateway-wide diff
-                    // and render it dimmed — a bare "·" would read as "cannot
+                    // and render it dimmed — a bare "×" would read as "cannot
                     // reach" when the VIF may well carry it.
                     const cell = scopedIn
                       ? row.cells.get(c.vifId)
                       : gatewayRowByCidr.get(row.cidr)?.cells.get(c.vifId);
+                    // ✓ ○ △ × — the same four marks the exported report uses, so a
+                    // reader moving between the panel and the HTML file does not have
+                    // to learn two keys for one dataset. They differ by OUTLINE, not
+                    // fill: the old `~`/`◐`/`·` set leaned on colour, and `·` was a
+                    // period doing a glyph's job at 6.5px.
                     const mark = cell?.state === 'exact'
                       ? '✓'
                       : cell?.state === 'covered'
-                        ? '~'
+                        ? '○'
                         : cell?.state === 'partial'
-                          ? '◐'
-                          : '·';
+                          ? '△'
+                          : '×';
                     // The ✓ stays green on a shared-fate row. It used to read amber,
                     // which carried nothing: `fate.vifIds` is every `exact`-or-
                     // `covered` cell and `gradeFate` only returns a fate when ALL of
@@ -1061,10 +1080,10 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                     const baseColor = cell?.state === 'exact'
                       ? okColor
                       : cell?.state === 'covered'
-                        ? warnColor
+                        ? coveredColor
                         : cell?.state === 'partial'
                           ? dangerColor
-                          : (light ? '#cbd5e1' : '#475569');
+                          : absentColor;
                     // The partial tooltip names the pieces this VIF does carry —
                     // without them "partly reachable" gives nothing to act on.
                     // Capped so one aggregate against 25 /24s stays readable.
@@ -1121,9 +1140,9 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
       }}>
         <div style={{ display: 'flex', gap: 8 * z, flexWrap: 'wrap' as const }}>
           <span><strong style={{ color: okColor }}>✓</strong> accepts this prefix</span>
-          <span><strong style={{ color: warnColor }}>~</strong> covered by a less specific route</span>
-          <span><strong style={{ color: dangerColor }}>◐</strong> only part of the block</span>
-          <span><strong style={{ color: dangerColor }}>·</strong> not reachable</span>
+          <span><strong style={{ color: coveredColor }}>○</strong> covered by a less specific route</span>
+          <span><strong style={{ color: dangerColor }}>△</strong> only part of the block</span>
+          <span><strong style={{ color: absentColor }}>×</strong> not reachable</span>
           <span><strong style={{ color: warnColor }}>⚡</strong> all carriers, one device</span>
           <span><strong style={{ color: warnColor }}>⚑</strong> all carriers, one site</span>
         </div>

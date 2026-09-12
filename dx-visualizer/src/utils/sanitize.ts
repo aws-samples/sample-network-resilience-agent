@@ -813,6 +813,35 @@ export class Sanitizer {
       maintenanceEvents: td.maintenanceEvents?.map((e) => this.maintenanceEvent(e)),
       homeAccountId: td.homeAccountId ? this.accountId(td.homeAccountId) : td.homeAccountId,
       regionNames,
+      // Kept, but masked. Dropping it would be the safe-by-omission choice this
+      // allowlist gives for free, and it would be wrong: a sanitized snapshot is
+      // exactly what gets attached to a report, and the reader needs to know the
+      // topology it was computed from was incomplete.
+      //
+      // `label` goes through freeText because it carries the spoke account ID
+      // for cross-account fetches (`${accountId}/${region}/VPCs`) — a known
+      // shape freeText handles.
+      //
+      // `message` is DROPPED, not masked, and that is the whole point. It is
+      // raw AWS error text: "User: arn:aws:iam::123456789012:user/network-auditor
+      // is not authorized to perform: ec2:DescribeRouteTables". freeText masks
+      // the account ID and leaves `network-auditor` untouched, because an IAM
+      // principal name is arbitrary prose with no matchable shape — and so are
+      // role names, session names, and bucket names that other AWS errors
+      // embed. A regex allowlist cannot be written against unbounded free text,
+      // so the only safe answer is not to publish it. Verified: this leaked a
+      // real username through the substring scan in sanitize.test.ts before it
+      // was dropped.
+      //
+      // Nothing the reader needs is lost. `kind` and `label` already say what
+      // failed and where, which is what makes the score untrustworthy; the
+      // exact AWS wording only matters to whoever is fixing the permission, and
+      // they have the console and the unsanitized export.
+      fetchIssues: td.fetchIssues?.map((i) => ({
+        kind: i.kind,
+        label: this.freeText(i.label) ?? i.label,
+        message: REDACTED_ISSUE_MESSAGE,
+      })),
     };
   }
 
@@ -837,9 +866,14 @@ export class Sanitizer {
         path: seg.path.map((a) => this.asn(a) ?? a),
       })),
       communities: r.communities.map((c) => this.community(c)),
-      // routeDirection / addressFamily / routeInstalledAt / awsLogicalDeviceId
-      // carry no customer identity — awsLogicalDeviceId is an AWS-side device
-      // name, handled the same way as elsewhere in this file (passed through).
+      // Same allocator the connection() and virtualInterface() branches use, so
+      // a route's device resolves to the SAME pseudonym as its parent VIF's.
+      // Consistency is the whole point, not just masking: leaving it raw here
+      // while the VIF above shows `aws-device-0001` puts the real value and its
+      // pseudonym side by side in one export, which re-identifies the pseudonym
+      // for every other object that shares the device.
+      awsLogicalDeviceId: this.awsDevice(r.awsLogicalDeviceId),
+      // routeDirection / addressFamily / routeInstalledAt carry no identity.
     };
   }
 
@@ -856,6 +890,14 @@ export class Sanitizer {
     };
   }
 }
+
+/**
+ * Stand-in for a FetchIssue message in a sanitized snapshot.
+ *
+ * Exported so the UI can recognise it and avoid rendering "failed: (redacted)"
+ * as though it were AWS's own wording.
+ */
+export const REDACTED_ISSUE_MESSAGE = '(error text withheld from sanitized export)';
 
 export function sanitizeTopology(td: TopologyData): TopologyData {
   return new Sanitizer().sanitizeTopology(td);

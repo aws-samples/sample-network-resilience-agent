@@ -5,9 +5,26 @@ import {
 } from '@aws-sdk/client-health';
 import type { AwsCredentials, DxMaintenanceEvent } from '../types/aws-resources';
 import { createHealthClient } from './aws-client';
+import { drainPages } from './paginate';
 
 /** Safety valve so a malformed nextToken loop can never spin forever. */
 const MAX_PAGES = 25;
+
+/**
+ * The maintenance calendar is a supplementary panel, so a truncated list is
+ * more useful here than no list at all — unlike the topology paginators, which
+ * throw so `logged()` can surface the failure.
+ */
+const ON_LIMIT = 'truncate' as const;
+
+/**
+ * Notified when the page cap actually truncates a Health list.
+ *
+ * `ON_LIMIT = 'truncate'` above is a deliberate choice — a partial calendar
+ * beats no calendar — but it used to make the loss invisible outside the
+ * console, so the caller could not tell the user the calendar is incomplete.
+ */
+export type TruncationSink = (label: string, maxPages: number) => void;
 
 /** Largest page the Health API accepts (all three Describe* calls). */
 const PAGE_SIZE = 100;
@@ -17,38 +34,6 @@ const PAGE_SIZE = 100;
  * API, NOT a paginated one, so a longer list is rejected rather than truncated.
  */
 const EVENT_DETAILS_BATCH = 10;
-
-/**
- * Drain a token-paginated Health call.
- *
- * Every Describe* call in this API returns a partial page plus a `nextToken`,
- * and callers that ignore the token lose data silently — no error, just a short
- * array that looks complete. Routing all of them through one helper means the
- * mistake can only be made once.
- */
-async function drainPages<T>(
-  label: string,
-  fetchPage: (nextToken: string | undefined) => Promise<{ items: T[]; nextToken?: string }>,
-): Promise<T[]> {
-  const all: T[] = [];
-  let nextToken: string | undefined;
-  let pages = 0;
-
-  do {
-    const { items, nextToken: token } = await fetchPage(nextToken);
-    all.push(...items);
-    nextToken = token;
-    pages++;
-  } while (nextToken && pages < MAX_PAGES);
-
-  if (nextToken) {
-    console.warn(
-      `[AWS] Health: stopped paging ${label} at ${MAX_PAGES} pages; some results may be missing`,
-    );
-  }
-
-  return all;
-}
 
 /** Split a list into fixed-size batches for a batch (non-paginated) API. */
 function chunk<T>(items: T[], size: number): T[][] {
@@ -72,17 +57,22 @@ function chunk<T>(items: T[], size: number): T[][] {
 async function fetchAllAffectedEntities(
   client: ReturnType<typeof createHealthClient>,
   eventArns: string[],
+  onTruncate?: TruncationSink,
 ): Promise<{ eventArn?: string; entityValue?: string }[]> {
-  return drainPages('affected entities', async (nextToken) => {
-    const res = await client.send(
-      new DescribeAffectedEntitiesCommand({
-        filter: { eventArns },
-        maxResults: PAGE_SIZE,
-        nextToken,
-      }),
-    );
-    return { items: res.entities ?? [], nextToken: res.nextToken };
-  });
+  return drainPages(
+    'Health: affected entities',
+    async (nextToken) => {
+      const res = await client.send(
+        new DescribeAffectedEntitiesCommand({
+          filter: { eventArns },
+          maxResults: PAGE_SIZE,
+          nextToken,
+        }),
+      );
+      return { items: res.entities ?? [], nextToken: res.nextToken };
+    },
+    { maxPages: MAX_PAGES, onLimit: ON_LIMIT, onTruncate },
+  );
 }
 
 /**
@@ -143,41 +133,52 @@ export const NON_RESOURCE_ENTITY_VALUES: ReadonlySet<string> = new Set([
  * than fit one page would otherwise have the remainder disappear from the
  * calendar.
  */
-async function fetchAllEvents(client: ReturnType<typeof createHealthClient>) {
+async function fetchAllEvents(
+  client: ReturnType<typeof createHealthClient>,
+  onTruncate?: TruncationSink,
+) {
   const issueFloor = new Date(Date.now() - ISSUE_LOOKBACK_DAYS * 86_400_000);
 
   const [scheduled, issues] = await Promise.all([
-    drainPages('scheduled changes', async (nextToken) => {
-      const res = await client.send(
-        new DescribeEventsCommand({
-          filter: {
-            services: ['DIRECTCONNECT'],
-            eventTypeCategories: ['scheduledChange'],
-            // Only currently-relevant events (upcoming or in-progress)
-            eventStatusCodes: ['upcoming', 'open'],
-          },
-          maxResults: PAGE_SIZE,
-          nextToken,
-        }),
-      );
-      return { items: res.events ?? [], nextToken: res.nextToken };
-    }),
-    drainPages('issues', async (nextToken) => {
-      const res = await client.send(
-        new DescribeEventsCommand({
-          filter: {
-            services: ['DIRECTCONNECT'],
-            eventTypeCategories: ['issue'],
-            eventStatusCodes: ['open', 'upcoming', 'closed'],
-            // Bounded, or an old account pages forever and hits MAX_PAGES.
-            startTimes: [{ from: issueFloor }],
-          },
-          maxResults: PAGE_SIZE,
-          nextToken,
-        }),
-      );
-      return { items: res.events ?? [], nextToken: res.nextToken };
-    }),
+    drainPages(
+      'Health: scheduled changes',
+      async (nextToken) => {
+        const res = await client.send(
+          new DescribeEventsCommand({
+            filter: {
+              services: ['DIRECTCONNECT'],
+              eventTypeCategories: ['scheduledChange'],
+              // Only currently-relevant events (upcoming or in-progress)
+              eventStatusCodes: ['upcoming', 'open'],
+            },
+            maxResults: PAGE_SIZE,
+            nextToken,
+          }),
+        );
+        return { items: res.events ?? [], nextToken: res.nextToken };
+      },
+      { maxPages: MAX_PAGES, onLimit: ON_LIMIT, onTruncate },
+    ),
+    drainPages(
+      'Health: issues',
+      async (nextToken) => {
+        const res = await client.send(
+          new DescribeEventsCommand({
+            filter: {
+              services: ['DIRECTCONNECT'],
+              eventTypeCategories: ['issue'],
+              eventStatusCodes: ['open', 'upcoming', 'closed'],
+              // Bounded, or an old account pages forever and hits MAX_PAGES.
+              startTimes: [{ from: issueFloor }],
+            },
+            maxResults: PAGE_SIZE,
+            nextToken,
+          }),
+        );
+        return { items: res.events ?? [], nextToken: res.nextToken };
+      },
+      { maxPages: MAX_PAGES, onLimit: ON_LIMIT, onTruncate },
+    ),
   ]);
 
   // Tag each event with its category so the UI can tell a planned change from an
@@ -215,11 +216,12 @@ async function fetchAllEventDetails(
  */
 export async function fetchDxMaintenanceEvents(
   creds: AwsCredentials,
+  onTruncate?: TruncationSink,
 ): Promise<DxMaintenanceEvent[]> {
   try {
     const client = createHealthClient(creds);
 
-    const tagged = await fetchAllEvents(client);
+    const tagged = await fetchAllEvents(client, onTruncate);
     if (tagged.length === 0) {
       console.log('[AWS] Health: no Direct Connect maintenance events');
       return [];
@@ -234,7 +236,7 @@ export async function fetchDxMaintenanceEvents(
     // Fetch descriptions and affected entity IDs in parallel
     const [eventDetails, affectedEntities] = await Promise.all([
       fetchAllEventDetails(client, eventArns),
-      fetchAllAffectedEntities(client, eventArns),
+      fetchAllAffectedEntities(client, eventArns, onTruncate),
     ]);
 
     const descriptionByArn = new Map<string, string>();
