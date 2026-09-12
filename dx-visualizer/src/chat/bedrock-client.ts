@@ -15,8 +15,22 @@ import { config } from '../utils/config';
 const MAX_TOOL_ROUNDS = config.maxToolRounds;
 const BASE_MODEL_ID = config.bedrockModelId;
 
+// Guard so the missing-guardrail warning fires once per session rather than
+// once per Converse round — getGuardrailConfig() runs inside the tool loop and
+// again for the forced final synthesis round.
+let warnedMissingGuardrail = false;
+
 function getGuardrailConfig(): GuardrailConfiguration | undefined {
-  if (!config.bedrockGuardrailId) return undefined;
+  if (!config.bedrockGuardrailId) {
+    // Only meaningful for real deployments; dev/test builds are noisy enough.
+    if (import.meta.env.PROD && !warnedMissingGuardrail) {
+      warnedMissingGuardrail = true;
+      console.warn(
+        '[Bedrock] No Guardrail configured — requests are sent with no PROMPT_ATTACK, content, or PII filtering. Production deployments should set VITE_BEDROCK_GUARDRAIL_ID (see docs/SETUP.md §8.1).'
+      );
+    }
+    return undefined;
+  }
   return {
     guardrailIdentifier: config.bedrockGuardrailId,
     guardrailVersion: config.bedrockGuardrailVersion || 'DRAFT',

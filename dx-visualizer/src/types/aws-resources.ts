@@ -16,7 +16,58 @@ export interface DxConnection {
   // visualizer renders these with an amber accent so it's clear the physical
   // path was reconstructed rather than observed via DescribeConnections.
   isInferred?: boolean;
+  /**
+   * Physical parent-port capacity recovered from paired
+   * VirtualInterfaceBps* / VirtualInterfaceUtilization* datapoints. This is
+   * deliberately separate from `bandwidth`: for a partner-hosted VIF the
+   * customer's contracted sub-rate is not exposed by AWS, so this value may be
+   * displayed but must not be used to grade utilization or N-1 headroom.
+   */
+  derivedPhysicalPortBps?: number;
   rateLimiterStatus?: RateLimiterStatus;
+  /**
+   * AWS's own verdict on whether the interconnect terminating this connection
+   * has logical redundancy: 'yes' | 'no' | 'unknown', verbatim from
+   * DescribeConnections. This is not derivable from the topology — it describes
+   * the partner-side device behind the port — so a `'no'` here is evidence a
+   * per-gateway device count cannot produce.
+   */
+  hasLogicalRedundancy?: string;
+  /** Whether the port supports 9001-byte MTU, regardless of what the VIFs use. */
+  jumboFrameCapable?: boolean;
+  /** Inbound prefix pool on the port, shared by its VIFs. See `PrefixPool`. */
+  prefixPool?: PrefixPool;
+}
+
+/**
+ * Inbound BGP route-prefix quota, per address family.
+ *
+ * AWS allocates each connection/LAG a pool (`sizeIpv4`/`sizeIpv6`) and each VIF
+ * draws an allocation from it (`allocatedIpv4`/`allocatedIpv6` on a VIF). The
+ * VIF's allocation — not a fixed 100 — is the number of prefixes its BGP session
+ * accepts before AWS drives it idle, and it is adjustable per VIF, so two
+ * redundant siblings can legitimately carry very different ceilings.
+ *
+ * Coverage notes, both load-bearing:
+ *  - `size*`/`unallocated*` are documented as "not applicable to hosted
+ *    connections or interconnects", so an account of partner-hosted ports gets
+ *    `undefined` — which means UNKNOWN, never 0. Only `unallocated === 0` is
+ *    evidence of exhaustion.
+ *  - `allocated*` is "not applicable to public virtual interfaces"; those are
+ *    graded against the documented public-VIF limit instead.
+ *
+ * `inUse*` is deliberately absent: the API emits `prefixPoolInUseCountIpv4` on
+ * the wire, but no released `@aws-sdk/client-direct-connect` models it, so the
+ * SDK's member allowlist drops it. The in-use count comes from accepted routes
+ * or the CloudWatch prefix metric instead.
+ */
+export interface PrefixPool {
+  sizeIpv4?: number;
+  sizeIpv6?: number;
+  unallocatedIpv4?: number;
+  unallocatedIpv6?: number;
+  allocatedIpv4?: number;
+  allocatedIpv6?: number;
 }
 
 export interface BgpPeer {
@@ -26,6 +77,14 @@ export interface BgpPeer {
   asn: number;
   customerAddress: string;
   amazonAddress: string;
+  /**
+   * Whether an MD5 authentication key is configured on this peering — a boolean
+   * ONLY. DescribeVirtualInterfaces returns the key itself (and embeds it again
+   * in `customerRouterConfig`); it must never be stored, exported, redacted-and-
+   * shipped, or placed in the chat context, so the fetch layer converts presence
+   * to this flag and discards the value.
+   */
+  hasAuthKey?: boolean;
 }
 
 export interface DxVirtualInterface {
@@ -52,6 +111,16 @@ export interface DxVirtualInterface {
   // traffic can reach, so it's the correct denominator for utilization. AWS
   // guarantees it cannot exceed the parent connection or LAG bandwidth.
   rateLimit?: string;
+  /**
+   * This VIF's slice of its parent port's inbound prefix pool. Only
+   * `allocatedIpv4`/`allocatedIpv6` are populated here — the pool `size` and
+   * `unallocated` counts belong to the connection or LAG.
+   */
+  prefixPool?: PrefixPool;
+  /** Whether the VIF's parent path supports jumbo frames, independent of `mtu`. */
+  jumboFrameCapable?: boolean;
+  /** Whether SiteLink (DX-to-DX routing between Regions) is enabled. */
+  siteLinkEnabled?: boolean;
 }
 
 // Rate-limiter quota on a connection or LAG: AWS allows a finite number of
@@ -123,6 +192,20 @@ export interface BgpPrefixMetrics {
    * reported, or in snapshots written before the split existed.
    */
   byFamily?: Partial<Record<'ipv4' | 'ipv6', { accepted?: number; advertised?: number }>>;
+  /**
+   * Lowest accepted count seen across the sampled window, against `accepted`
+   * which is the highest. Both come from the same datapoints — the fetch used to
+   * keep only the newest and discard the rest, which threw away the fact that a
+   * count is moving at all.
+   *
+   * A spread here is the finding: a session whose accepted-prefix count swings
+   * between 14 and 21 over half an hour is either flapping or being reconfigured,
+   * and neither is visible from a single reading. Absent in snapshots written
+   * before the fold existed, so a missing value means "not measured", not "stable".
+   */
+  acceptedFloor?: number;
+  /** Datapoints folded into the figures above. 1 means a single reading. */
+  samples?: number;
 }
 
 // BGP session stability for one VIF, derived from the AWS/DX
@@ -203,6 +286,8 @@ export interface DxLag {
   lagState: string;
   connections: DxConnection[];
   rateLimiterStatus?: RateLimiterStatus;
+  /** Inbound prefix pool on the LAG, shared by the VIFs riding it. */
+  prefixPool?: PrefixPool;
 }
 
 export interface Vpc {

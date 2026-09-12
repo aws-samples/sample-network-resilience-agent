@@ -2,6 +2,7 @@ import type { TopologyData } from '../types/topology';
 import type { DxVirtualInterface, VifRoute } from '../types/aws-resources';
 import type { Recommendation, NodeAnnotation, ResiliencyLevel } from '../types/recommendations';
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
+import { uniqueByCidr } from './vif-route-diff';
 
 type RuleResult = { annotations: NodeAnnotation[]; recommendation: Recommendation | null };
 
@@ -364,7 +365,7 @@ export function ruleConsistentPrefixAdvertisement(topology: TopologyData): RuleR
           category: 'bestpractice',
           severity: 'warning',
           title: 'Redundant VIFs are not receiving the same prefixes',
-          description: `BGP route data shows redundant Virtual Interfaces in the same routing domain accepting different prefix sets, so the failover path does not have the same reachability as the primary. Each VIF below is compared against every prefix its routing domain receives, and is listed with what it does not carry: ${domainFindings.join('. ')}. Add the missing prefixes on the customer router behind each VIF listed, or confirm the difference is intentional traffic engineering. Click Route diff on the Direct Connect Gateway to see, prefix by prefix, which other VIFs carry it and which prefixes have no backup path at all.`,
+          description: `Redundant VIFs accept different prefix sets, so the failover path does not reach everything the primary does: ${domainFindings.join('. ')}. Add the missing prefixes on the customer router behind each VIF, or confirm the difference is intentional traffic engineering.`,
           additionalNodes: [],
           additionalEdges: [],
         },
@@ -495,20 +496,81 @@ export function ruleLagMinLinks(topology: TopologyData): RuleResult {
 // the overwhelmingly common family, and the alternative — dropping them — would
 // under-report a session that is actually near teardown.
 //
-// We warn above the hard limit, caution near it, and confirm "met" when healthy.
-// Public VIFs have a higher published limit (1000) and are excluded from this check.
-const BGP_ROUTE_HARD_LIMIT = 100;
-const BGP_ROUTE_CAUTION_THRESHOLD = 80;
+// We warn above the limit, caution near it, and confirm "met" when healthy.
+//
+// The DENOMINATOR is not a constant. Each VIF draws an allocation from its
+// parent port's inbound prefix pool (`vif.prefixPool.allocatedIpv4/Ipv6`), and
+// that allocation is what AWS enforces — it is adjustable per VIF, so a real
+// account can hold 20 on one VIF and 1000 on its redundant sibling. Grading
+// everything against a hardcoded 100 reads a VIF at 18 of its own 20 (90%, two
+// prefixes from teardown) as 18% and says nothing. `DEFAULT_*` below are only
+// the fallback for a VIF whose allocation AWS did not report.
+export const BGP_ROUTE_HARD_LIMIT = 100;
+export const BGP_ROUTE_CAUTION_THRESHOLD = 80;
+/** Published per-BGP-session limit for a public VIF; not increasable. */
+export const PUBLIC_VIF_PREFIX_LIMIT = 1000;
+/** Fraction of the quota at which a VIF is reported as under pressure. */
+export const PREFIX_UTILIZATION_WARN = 0.8;
+/**
+ * Critical at the quota itself, not at some fraction of it.
+ *
+ * The two states are qualitatively different, not two points on a scale: at or
+ * over the quota, AWS drops the excess and can tear the session down, which is an
+ * outage. At 95% nothing is broken yet. An earlier draft put this at 0.95 and a
+ * VIF five prefixes from the ceiling reported the same severity as one already
+ * over it, which loses the only distinction the reader acts on.
+ */
+export const PREFIX_UTILIZATION_CRITICAL = 1;
 
-type FamilyCounts = { ipv4?: number; ipv6?: number };
+export type PrefixQuota = {
+  limit: number;
+  /**
+   * Where `limit` came from, because the wording has to differ:
+   *  - `allocation` — the VIF's own pool allocation, reported by AWS. Citable.
+   *  - `public` — the documented public-VIF limit.
+   *  - `default` — no allocation reported (hosted port, older SDK, mock, or v1
+   *    snapshot), so this is the documented per-family default and the finding
+   *    must not claim the VIF's real ceiling is known.
+   */
+  source: 'allocation' | 'public' | 'default';
+};
+
+/**
+ * The prefix ceiling for one VIF on one address family.
+ *
+ * Exported so the rules, the executive-summary driver and the HTML report all
+ * divide by the same number. When the report used a hardcoded 100 and a rule
+ * used something else, the same VIF appeared at two different percentages in one
+ * document.
+ */
+export function prefixQuotaFor(vif: DxVirtualInterface, family: 'ipv4' | 'ipv6'): PrefixQuota {
+  if (vif.virtualInterfaceType === 'public') {
+    // Pool allocations are documented as not applicable to public VIFs.
+    return { limit: PUBLIC_VIF_PREFIX_LIMIT, source: 'public' };
+  }
+  const allocated = family === 'ipv6' ? vif.prefixPool?.allocatedIpv6 : vif.prefixPool?.allocatedIpv4;
+  if (allocated !== undefined && allocated > 0) return { limit: allocated, source: 'allocation' };
+  return { limit: BGP_ROUTE_HARD_LIMIT, source: 'default' };
+}
+
+export type FamilyCounts = { ipv4?: number; ipv6?: number };
 
 // Per-family accepted counts for one VIF, or undefined when neither source has
 // data. Exact routes win over the metric.
-function acceptedByFamily(topology: TopologyData, vifId: string): FamilyCounts | undefined {
+//
+// Exported so the report can rank the same prefix pressure per DX gateway
+// (`report-quickview.ts`). Two implementations of "how many prefixes is this VIF
+// accepting" would disagree the first time a source was added to one of them, and
+// the report would then contradict the finding.
+export function acceptedByFamily(topology: TopologyData, vifId: string): FamilyCounts | undefined {
   const routes = topology.vifRoutes?.get(vifId)?.accepted;
   if (routes) {
     const counts: FamilyCounts = {};
-    for (const r of routes) {
+    // Dedupe first: a prefix installed on two AWS logical devices is returned
+    // twice, and counting entries rather than prefixes doubled the figure — it
+    // put one VIF at "2200 of 1000 (220% of the quota)", a state AWS would have
+    // torn the BGP session down for rather than reported.
+    for (const r of uniqueByCidr(routes)) {
       const fam = r.addressFamily === 'ipv6' ? 'ipv6' : 'ipv4';
       counts[fam] = (counts[fam] ?? 0) + 1;
     }
@@ -539,8 +601,9 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
 
   const over: string[] = [];
   const near: string[] = [];
-  const healthy: Array<{ id: string; count: number }> = [];
+  const healthy: Array<{ id: string; pct: number; accepted: number; limit: number }> = [];
   const unknown: string[] = [];
+  let anyAllocationKnown = false;
 
   for (const vif of applicableVifs) {
     const counts = acceptedByFamily(topology, vif.virtualInterfaceId);
@@ -550,30 +613,61 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
       continue;
     }
 
-    // Each family is judged against its own 100-prefix budget. A VIF is
-    // reported at its worst family, and dual-stack VIFs name the family so the
-    // reader knows which side to summarize.
+    // Each family is judged against its OWN allocation, and a VIF is reported at
+    // whichever family sits closest to its ceiling — not whichever has the bigger
+    // raw count. Those differ whenever the two families have different
+    // allocations, and it is the ratio that predicts teardown.
     const families = (['ipv4', 'ipv6'] as const).filter((f) => counts[f] !== undefined);
     const isDualStack = families.length > 1;
-    const worst = families.reduce(
-      (acc, f) => ((counts[f] ?? 0) > (counts[acc] ?? 0) ? f : acc),
-      families[0] ?? 'ipv4',
-    );
-    const peak = counts[worst] ?? 0;
-    const detail = isDualStack
-      ? `${label} (${peak} accepted on ${worst === 'ipv4' ? 'IPv4' : 'IPv6'})`
-      : `${label} (${peak} accepted)`;
+    const graded = families.map((f) => {
+      const quota = prefixQuotaFor(vif, f);
+      return { family: f, accepted: counts[f] ?? 0, ...quota, ratio: (counts[f] ?? 0) / quota.limit };
+    });
+    const worst = graded.reduce((acc, g) => (g.ratio > acc.ratio ? g : acc), graded[0]);
+    if (!worst) {
+      unknown.push(label);
+      continue;
+    }
+    if (worst.source === 'allocation') anyAllocationKnown = true;
 
-    if (peak >= BGP_ROUTE_HARD_LIMIT) {
+    const pct = Math.round(worst.ratio * 100);
+    const famName = worst.family === 'ipv4' ? 'IPv4' : 'IPv6';
+    // Always print the denominator and, when it is the VIF's own allocation, say
+    // so — "18 of 20 (90%)" is actionable where a bare "18 accepted" is not, and
+    // a reader who knows the default is 100 would otherwise assume we used it.
+    const quotaWord = worst.source === 'allocation' ? 'allocation' : 'default';
+    const detail = isDualStack
+      ? `${label} (${worst.accepted} accepted on ${famName}, ${quotaWord} ${worst.limit}, ${pct}%)`
+      : `${label} (${worst.accepted} accepted, ${quotaWord} ${worst.limit}, ${pct}%)`;
+
+    if (worst.ratio >= PREFIX_UTILIZATION_CRITICAL) {
+      // One branch for at-or-over the ceiling, whatever the current BGP state.
+      // An earlier version carved out "above a reported allocation while the
+      // session is UP" and reported it as two counts disagreeing instead; that
+      // asked the reader to reason about measurement provenance before acting on
+      // a number that is at its ceiling either way.
       over.push(detail);
-    } else if (peak >= BGP_ROUTE_CAUTION_THRESHOLD) {
+    } else if (worst.ratio >= PREFIX_UTILIZATION_WARN) {
       near.push(detail);
     } else {
-      healthy.push({ id: label, count: peak });
+      healthy.push({ id: label, pct, accepted: worst.accepted, limit: worst.limit });
     }
   }
 
+  // Only cite the allocation as the enforced ceiling when AWS actually reported
+  // one for something in this account; otherwise name the documented default.
+  const basis = anyAllocationKnown
+    ? "each VIF's allocated inbound prefix count (adjustable per VIF, so redundant siblings can differ)"
+    : 'the documented default of 100 prefixes per address family';
+
   if (over.length > 0) {
+    // The near list is still worth printing here: this branch returns before the
+    // warning one, so a sibling sitting at 90% would otherwise go unmentioned in a
+    // report whose headline is another VIF's breach — and it is the next one to
+    // trip.
+    const alsoNear = near.length > 0
+      ? ` Separately, at or above ${Math.round(PREFIX_UTILIZATION_WARN * 100)}% of the allocation: ${near.join(', ')}.`
+      : '';
     return {
       annotations: [],
       recommendation: {
@@ -581,8 +675,8 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
         ruleId: 'bgp-route-limit',
         category: 'bestpractice',
         severity: 'critical',
-        title: 'BGP route limit reached — session at risk of teardown',
-        description: `The following VIFs are at or above the 100-prefix limit for on-premises → AWS advertisement: ${over.join(', ')}. The quota is 100 prefixes each for IPv4 and IPv6, counted per address family — exceeding it on either family causes BGP session teardown and network disconnection. Summarize or filter on-premises routes immediately. See https://docs.aws.amazon.com/directconnect/latest/UserGuide/limits.html`,
+        title: 'BGP prefix allocation reached — the session could go down',
+        description: `At or over the inbound prefix allocation, per address family: ${over.join(', ')}. AWS drops the excess and can drive a VIF advertising past its allocated count into an idle state, so the BGP session could go down and take the path with it. Summarize or filter on-premises routes, or raise the allocation.${alsoNear}`,
         additionalNodes: [],
         additionalEdges: [],
       },
@@ -597,8 +691,8 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
         ruleId: 'bgp-route-limit',
         category: 'bestpractice',
         severity: 'warning',
-        title: 'BGP routes approaching the 100-prefix limit',
-        description: `The following VIFs are within 20 prefixes of the 100-prefix hard limit, which applies separately to IPv4 and IPv6: ${near.join(', ')}. Plan summarization now so on-premises growth does not trigger a BGP session teardown. See https://docs.aws.amazon.com/directconnect/latest/UserGuide/limits.html`,
+        title: 'BGP prefixes approaching the quota',
+        description: `At or above ${Math.round(PREFIX_UTILIZATION_WARN * 100)}% of the inbound prefix allocation, which applies separately to IPv4 and IPv6: ${near.join(', ')}. Plan summarization, or raise the allocation, before on-premises growth triggers a BGP session teardown.`,
         additionalNodes: [],
         additionalEdges: [],
       },
@@ -606,7 +700,11 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
   }
 
   if (healthy.length > 0 && unknown.length === 0) {
-    const max = healthy.reduce((m, h) => Math.max(m, h.count), 0);
+    // Report the VIF closest to its own ceiling, by ratio — on an estate with
+    // different allocations per VIF the busiest by percentage is often not the
+    // one with the biggest raw count, and the percentage is what predicts
+    // teardown.
+    const busiest = healthy.reduce((m, h) => (h.pct > m.pct ? h : m), healthy[0]);
     return {
       annotations: [],
       recommendation: {
@@ -614,8 +712,8 @@ export function ruleBgpRouteLimit(topology: TopologyData): RuleResult {
         ruleId: 'bgp-route-limit-ok',
         category: 'bestpractice',
         severity: 'info',
-        title: 'BGP routes within the 100-prefix limit',
-        description: `All ${healthy.length} private/transit VIF${healthy.length > 1 ? 's are well under' : ' is well under'} the 100-prefix hard limit — peak observed is ${max} prefix${max === 1 ? '' : 'es'} accepted from on-premises on any single address family (the quota is 100 each for IPv4 and IPv6).`,
+        title: 'BGP prefixes within quota on every VIF',
+        description: `All ${healthy.length} private/transit VIF${healthy.length > 1 ? 's are' : ' is'} within ${healthy.length > 1 ? 'their' : 'its'} inbound prefix quota — the busiest peak observed is ${busiest.accepted} of ${busiest.limit} on ${busiest.id} (${busiest.pct}% of its ceiling on its worst address family). The quota is ${basis}.`,
         additionalNodes: [],
         additionalEdges: [],
       },
@@ -825,12 +923,37 @@ export function ruleDxgwPropagationEnabled(topology: TopologyData): RuleResult {
   );
   if (!hasTransitVif) return { annotations: [], recommendation: null };
 
+  // A transit VIF somewhere in the account does not make every TGW route table
+  // DX-relevant. Restrict the check to TGWs that are actually associated with a
+  // DX gateway (or expose a DXGW attachment in the regional inventory).
+  const dxAttachedTgwIds = new Set<string>();
+  for (const assoc of topology.dxGatewayAssociations) {
+    const associationState = assoc.associationState.toLowerCase();
+    if (
+      assoc.associatedGateway.id
+      && /transit.?gateway/i.test(assoc.associatedGateway.type ?? '')
+      && (associationState === 'associated' || associationState === 'associating')
+    ) {
+      dxAttachedTgwIds.add(assoc.associatedGateway.id);
+    }
+  }
+  for (const attachment of topology.transitGatewayAttachments) {
+    if (/direct-connect|dxgw/i.test(attachment.resourceType)) {
+      dxAttachedTgwIds.add(attachment.transitGatewayId);
+    }
+  }
+  if (dxAttachedTgwIds.size === 0) {
+    return { annotations: [], recommendation: null };
+  }
+
   const missing: string[] = [];
   const pending: string[] = [];
   let checked = 0;
 
-  for (const tables of topology.tgwRouteTables.values()) {
+  for (const [mapTgwId, tables] of topology.tgwRouteTables.entries()) {
     for (const entry of tables) {
+      const tgwId = entry.routeTable.transitGatewayId || mapTgwId;
+      if (!dxAttachedTgwIds.has(tgwId)) continue;
       if (!entry.propagations) continue; // unknown, not empty
       checked++;
       const dxProps = entry.propagations.filter((p) =>
@@ -1025,17 +1148,19 @@ export function ruleDxPartnerDiversity(topology: TopologyData): RuleResult {
     return { annotations: [], recommendation: null };
   }
 
-  const partners = new Set(
-    topology.connections
-      .map((c) => c.partnerName)
-      .filter((p): p is string => !!p && p.trim().length > 0),
+  const withKnownPartner = topology.connections.filter(
+    (c) => !!c.partnerName && c.partnerName.trim().length > 0,
   );
+  const partners = new Set(withKnownPartner.map((c) => c.partnerName!.trim()));
 
-  // If there are no named partners, we can't tell — stay silent.
-  if (partners.size === 0) return { annotations: [], recommendation: null };
+  // One named connection plus one hosted connection with hidden metadata is not
+  // enough evidence to assert concentration. Require at least two observable
+  // connection records before evaluating diversity.
+  if (withKnownPartner.length < 2) return { annotations: [], recommendation: null };
   if (partners.size >= 2) return { annotations: [], recommendation: null };
 
   const partnerName = [...partners][0];
+  const unknownPartnerCount = topology.connections.length - withKnownPartner.length;
 
   // DescribeLocations tells us which providers actually serve the customer's
   // facilities, so name the real alternatives instead of advising "use another
@@ -1062,6 +1187,9 @@ export function ruleDxPartnerDiversity(topology: TopologyData): RuleResult {
     named.length > 0
       ? ` Other providers available at your current location${occupiedCodes.size > 1 ? 's' : ''} include: ${named.join(', ')}${alternatives.length > named.length ? `, and ${alternatives.length - named.length} more` : ''}.`
       : '';
+  const evidenceText = unknownPartnerCount > 0
+    ? `All ${withKnownPartner.length} connections with observable partner metadata use ${partnerName}; ${unknownPartnerCount} hosted connection${unknownPartnerCount === 1 ? ' has' : 's have'} no observable partner metadata and ${unknownPartnerCount === 1 ? 'is' : 'are'} excluded from that claim.`
+    : `All ${withKnownPartner.length} Direct Connect connections use ${partnerName}.`;
 
   return {
     annotations: [],
@@ -1071,7 +1199,7 @@ export function ruleDxPartnerDiversity(topology: TopologyData): RuleResult {
       category: 'bestpractice',
       severity: 'info',
       title: 'Consider sourcing Direct Connect from multiple partners',
-      description: `All Direct Connect connections are sourced from the same partner/last-mile provider (${partnerName}). If budget allows, procuring Direct Connect from multiple partners minimizes single-point-of-failure risk on the partner side (partner network outages, partner maintenance events).${alternativesText}`,
+      description: `${evidenceText} If budget allows, procuring Direct Connect from multiple partners minimizes single-point-of-failure risk on the partner side (partner network outages, partner maintenance events).${alternativesText}`,
       additionalNodes: [],
       additionalEdges: [],
     },
@@ -1179,9 +1307,9 @@ const FAILOVER_TESTING_GUIDANCE =
   'Exercise your redundant paths on a schedule. AWS allows you to temporarily shut down BGP peers on your VIFs from the AWS side for up to 72 hours, which lets you simulate router maintenance and validate failover before it happens for real. Note: partner-provided / hosted VIFs may be under partner monitoring — coordinate with your DX partner before running failover tests.';
 
 /** Tests older than this are treated as stale evidence. */
-const FAILOVER_TEST_STALE_DAYS = 365;
+export const FAILOVER_TEST_STALE_DAYS = 365;
 
-function daysSince(iso: string): number | undefined {
+export function daysSince(iso: string): number | undefined {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return undefined;
   const ms = Date.now() - then;
@@ -1329,6 +1457,372 @@ export function ruleDxFailoverTesting(topology: TopologyData): RuleResult {
   };
 }
 
+// --- Rule: accepted-prefix count is not holding steady ---
+// The prefix metric is fetched on every login, and folding the whole window
+// instead of reading the newest datapoint makes movement visible for free. A
+// count that swings while nothing is supposed to be changing means the session is
+// flapping, a peer is being reconfigured, or on-premises summarization is
+// intermittent — and it also invalidates a single-reading headroom calculation,
+// because the number the quota check divided by is only one point on a moving line.
+//
+// Requires `samples > 1`: a single datapoint has no spread to measure, and
+// treating a missing floor as 0 would report every VIF as maximally unstable.
+export const PREFIX_CHURN_MIN_SPREAD = 2;
+export const PREFIX_CHURN_MIN_RATIO = 0.2;
+
+export function ruleBgpPrefixChurn(topology: TopologyData): RuleResult {
+  const unstable: Array<{ label: string; floor: number; peak: number }> = [];
+  for (const vif of topology.virtualInterfaces) {
+    const metric = topology.bgpPrefixMetrics?.get(vif.virtualInterfaceId);
+    if (!metric || (metric.samples ?? 0) < 2) continue;
+    const peak = metric.accepted;
+    const floor = metric.acceptedFloor;
+    if (peak === undefined || floor === undefined || peak <= 0) continue;
+    const spread = peak - floor;
+    if (spread < PREFIX_CHURN_MIN_SPREAD || spread / peak < PREFIX_CHURN_MIN_RATIO) continue;
+    unstable.push({ label: vifLabel(vif), floor, peak });
+  }
+
+  if (unstable.length === 0) return { annotations: [], recommendation: null };
+
+  unstable.sort((a, b) => b.peak - b.floor - (a.peak - a.floor));
+  const listed = unstable.map((u) => `${u.label} (${u.floor}–${u.peak} prefixes)`).join(', ');
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-prefix-churn',
+      ruleId: 'prefix-churn',
+      category: 'bestpractice',
+      severity: 'warning',
+      title: 'Accepted prefix count is not holding steady',
+      description: `The number of prefixes AWS is accepting from on-premises moved during the sampled window on ${unstable.length} VIF${unstable.length === 1 ? '' : 's'}: ${listed}. On a stable session this figure should barely move. A swing means routes are being withdrawn and re-advertised — a flapping BGP session, an in-progress change on the customer router, or intermittent summarization — and until it settles, any headroom calculation against the quota is measuring a moving target. Check the customer router's BGP logs for the same window, and the session's flap history alongside it.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: Weakest prefix allocation across redundant siblings ---
+// A per-VIF utilization check is blind to the case that actually breaks failover.
+// Allocations are set per VIF, so one routing domain can hold 20 / 100 / 100 /
+// 1000 across four supposedly interchangeable paths. Every VIF can sit
+// comfortably inside its own ceiling while the domain's real capacity is the
+// SMALLEST of them: let on-premises grow past 20 and that one session tears down
+// while its siblings stay up — an asymmetric failure with no single-VIF symptom.
+//
+// Only graded where AWS reported an allocation, and only for domains with two or
+// more VIFs: one VIF is not a redundancy claim, and an unreported allocation is
+// unknown rather than equal.
+export function ruleWeakestPrefixAllocation(topology: TopologyData): RuleResult {
+  const byDomain = new Map<string, DxVirtualInterface[]>();
+  for (const vif of topology.virtualInterfaces) {
+    if (vif.virtualInterfaceType === 'public') continue;
+    const domain = vif.directConnectGatewayId ?? vif.virtualGatewayId;
+    if (!domain) continue;
+    byDomain.set(domain, [...(byDomain.get(domain) ?? []), vif]);
+  }
+
+  const tight: string[] = [];
+  for (const [domainId, vifs] of byDomain) {
+    if (vifs.length < 2) continue;
+    const allocations = vifs
+      .map((v) => ({ vif: v, limit: v.prefixPool?.allocatedIpv4 }))
+      .filter((a): a is { vif: DxVirtualInterface; limit: number } => a.limit !== undefined && a.limit > 0);
+    // Partial coverage is still unknown coverage: if any sibling's ceiling is
+    // unreported it could be the real minimum, so don't name a weakest link.
+    if (allocations.length !== vifs.length) continue;
+
+    const weakest = allocations.reduce((m, a) => (a.limit < m.limit ? a : m), allocations[0]);
+    const strongest = allocations.reduce((m, a) => (a.limit > m.limit ? a : m), allocations[0]);
+    if (weakest.limit === strongest.limit) continue;
+
+    // Peak demand across the domain — what the weakest path would have to absorb.
+    let peak = 0;
+    for (const { vif } of allocations) {
+      const counts = acceptedByFamily(topology, vif.virtualInterfaceId);
+      peak = Math.max(peak, counts?.ipv4 ?? 0);
+    }
+    if (peak === 0) continue;
+
+    const headroom = weakest.limit - peak;
+    if (headroom > weakest.limit * (1 - PREFIX_UTILIZATION_WARN)) continue;
+
+    // A negative headroom is the interesting case and "-3 spare" reads as a typo,
+    // so name it for what it is: the weakest path cannot carry today's peak at all.
+    const margin = headroom >= 0
+      ? `${headroom} spare`
+      : `${-headroom} short of that peak`;
+    tight.push(
+      `${domainLabel(topology, domainId)}: weakest path ${vifLabel(weakest.vif)} allows ${weakest.limit} IPv4 prefixes ` +
+        `against ${peak} in use on the busiest sibling (${margin}), while ${vifLabel(strongest.vif)} allows ${strongest.limit}`,
+    );
+  }
+
+  if (tight.length === 0) return { annotations: [], recommendation: null };
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-prefix-allocation-skew',
+      ruleId: 'prefix-allocation-skew',
+      category: 'bestpractice',
+      severity: 'warning',
+      title: 'Redundant VIFs have unequal prefix allocations',
+      description: `A routing domain can only absorb as many on-premises prefixes as its smallest per-VIF allocation. ${tight.join('. ')}. Because the allocations differ, on-premises growth will tear down the smallest session first while the others stay up — a partial failure that looks healthy from every other angle. Raise the weaker allocation to match, or summarize on-premises routes. See https://docs.aws.amazon.com/directconnect/latest/UserGuide/limits.html`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: Connection prefix pool fully allocated ---
+// `unallocatedIpv4/Ipv6 === 0` means the port has no inbound prefix capacity
+// left to give a new VIF or to widen an existing one. `undefined` is UNKNOWN,
+// not zero — AWS documents these counts as not applicable to hosted connections
+// and interconnects, so an all-hosted account reports nothing and must not be
+// told its pools are exhausted.
+export function ruleConnectionPrefixPoolExhausted(topology: TopologyData): RuleResult {
+  const exhausted: string[] = [];
+  for (const conn of topology.connections) {
+    if (conn.isInferred) continue;
+    const pool = conn.prefixPool;
+    if (!pool) continue;
+    const families: string[] = [];
+    if (pool.unallocatedIpv4 === 0) families.push('IPv4');
+    if (pool.unallocatedIpv6 === 0) families.push('IPv6');
+    if (families.length === 0) continue;
+    exhausted.push(`${conn.connectionName || conn.connectionId} at ${conn.location} (${families.join(' and ')})`);
+  }
+
+  if (exhausted.length === 0) return { annotations: [], recommendation: null };
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-prefix-pool-exhausted',
+      ruleId: 'prefix-pool-exhausted',
+      category: 'bestpractice',
+      severity: 'warning',
+      title: 'Connection prefix pool fully allocated',
+      description: `${exhausted.length === 1 ? 'This connection has' : `These ${exhausted.length} connections have`} no unallocated inbound prefixes left in ${exhausted.length === 1 ? 'its' : 'their'} pool: ${exhausted.join(', ')}. A new virtual interface on the port cannot be given a prefix allocation, and an existing VIF's allocation cannot be raised, until capacity is freed from another VIF on the same connection. Review the per-VIF allocations before the next change window rather than during one.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: One AWS logical device behind several routing domains ---
+// Every other device check is scoped INSIDE one DX gateway, so each gateway is
+// graded alone and each can pass while they all sit on the same hardware. One
+// real account had five VIFs across five connections and four routing domains on
+// a single logical device: five "acceptable" verdicts, one shared failure, and a
+// gateway whose only VIF was on it would go to zero paths.
+//
+// Reported at estate scope because that is the only scope that can see it.
+export function ruleSharedLogicalDevice(topology: TopologyData): RuleResult {
+  type Dependent = { vif: DxVirtualInterface; domain: string };
+  const byDevice = new Map<string, Dependent[]>();
+  for (const vif of topology.virtualInterfaces) {
+    const device = vif.awsLogicalDeviceId;
+    const domain = vif.directConnectGatewayId ?? vif.virtualGatewayId;
+    if (!device || !domain) continue;
+    byDevice.set(device, [...(byDevice.get(device) ?? []), { vif, domain }]);
+  }
+
+  // How many paths each domain has in total, so we can say which would hit zero.
+  const domainSize = new Map<string, number>();
+  for (const vif of topology.virtualInterfaces) {
+    const domain = vif.directConnectGatewayId ?? vif.virtualGatewayId;
+    if (!domain) continue;
+    domainSize.set(domain, (domainSize.get(domain) ?? 0) + 1);
+  }
+
+  const shared: Array<{ device: string; domains: string[]; stranded: string[]; vifCount: number }> = [];
+  for (const [device, dependents] of byDevice) {
+    const domains = [...new Set(dependents.map((d) => d.domain))];
+    if (domains.length < 2) continue;
+    const stranded = domains.filter(
+      (d) => (domainSize.get(d) ?? 0) === dependents.filter((x) => x.domain === d).length,
+    );
+    shared.push({
+      device,
+      domains: domains.map((d) => domainLabel(topology, d)),
+      stranded: stranded.map((d) => domainLabel(topology, d)),
+      vifCount: dependents.length,
+    });
+  }
+
+  if (shared.length === 0) return { annotations: [], recommendation: null };
+
+  shared.sort((a, b) => b.domains.length - a.domains.length);
+  const anyStranded = shared.some((s) => s.stranded.length > 0);
+  const lines = shared.map((s) => {
+    const base = `${s.device} carries ${s.vifCount} VIF${s.vifCount === 1 ? '' : 's'} for ${s.domains.length} routing domains (${s.domains.join(', ')})`;
+    return s.stranded.length > 0
+      ? `${base} — ${s.stranded.join(', ')} would be left with no path at all`
+      : base;
+  });
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-shared-logical-device',
+      ruleId: 'shared-logical-device',
+      category: 'bestpractice',
+      // Losing every path for a routing domain is an outage, not a degradation.
+      severity: anyStranded ? 'critical' : 'warning',
+      title: 'One AWS logical device is a shared point of failure across gateways',
+      description: `Separate connections can still terminate on the same AWS logical device, and maintenance or failure there affects all of them at once. ${lines.join('. ')}. Each gateway may look adequately redundant on its own — this exposure is only visible across the estate. Check awsLogicalDeviceId when ordering the next connection and place it on a different device, ideally at a different DX location.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: connection support for a secondary BGP peer ---
+// `hasLogicalRedundancy` is documented as "Indicates whether the connection
+// supports a secondary BGP peer in the same address family (IPv4/IPv6)"
+// (API_Connection reference). It is NOT a device- or site-redundancy signal, and an
+// earlier version of this rule said it was — claiming a `'yes'` meant "a single
+// device event should not take the port down", which AWS never states. Physical
+// redundancy is graded from the per-location device counts; keep the two apart.
+export function ruleConnectionLogicalRedundancy(topology: TopologyData): RuleResult {
+  const graded = topology.connections.filter((c) => !c.isInferred && c.hasLogicalRedundancy !== undefined);
+  if (graded.length === 0) return { annotations: [], recommendation: null };
+
+  const none = graded.filter((c) => c.hasLogicalRedundancy?.toLowerCase() === 'no');
+  if (none.length === 0) {
+    return {
+      annotations: [],
+      recommendation: {
+        id: 'bp-logical-redundancy',
+        ruleId: 'logical-redundancy-ok',
+        category: 'bestpractice',
+        severity: 'info',
+        title: 'Every connection supports a secondary BGP peer',
+        description: `All ${graded.length} connection${graded.length === 1 ? '' : 's'} report hasLogicalRedundancy = "yes", so each can carry a second BGP peer in the same address family. Note this says nothing about device or site redundancy — those are graded separately from the per-location device counts.`,
+        additionalNodes: [],
+        additionalEdges: [],
+      },
+    };
+  }
+
+  const byLocation = new Map<string, string[]>();
+  for (const c of none) {
+    byLocation.set(c.location, [...(byLocation.get(c.location) ?? []), c.connectionName || c.connectionId]);
+  }
+  const lines = [...byLocation].map(([loc, names]) => `${loc}: ${names.join(', ')}`);
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-logical-redundancy',
+      ruleId: 'logical-redundancy',
+      category: 'bestpractice',
+      severity: 'warning',
+      title: 'These connections do not support a secondary BGP peer',
+      description: `AWS reports hasLogicalRedundancy = "no" for ${none.length} of ${graded.length} connection${graded.length === 1 ? '' : 's'} — ${lines.join('; ')}. Per the Direct Connect API reference this field means the connection does not support a secondary BGP peer in the same address family, so a redundant BGP session cannot be run over it — the VIF has a single peering and no in-connection failover for the session itself. It is NOT a statement about device or location redundancy, which are graded from the per-location device counts. Ask the provider whether a connection supporting dual peers is available where session-level redundancy matters.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: DX gateway with nothing attached ---
+export function ruleUnusedDxGateway(topology: TopologyData): RuleResult {
+  const idle = topology.dxGateways.filter((gw) => {
+    const hasVif = topology.virtualInterfaces.some(
+      (v) => v.directConnectGatewayId === gw.directConnectGatewayId,
+    );
+    const hasAssoc = topology.dxGatewayAssociations.some(
+      (a) => a.directConnectGatewayId === gw.directConnectGatewayId,
+    );
+    return !hasVif && !hasAssoc;
+  });
+
+  if (idle.length === 0) return { annotations: [], recommendation: null };
+
+  const names = idle.map((g) => g.directConnectGatewayName || g.directConnectGatewayId);
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-unused-dxgw',
+      ruleId: 'unused-dxgw',
+      category: 'bestpractice',
+      severity: 'info',
+      title: 'Direct Connect gateway with no virtual interfaces or associations',
+      description: `${names.join(', ')} ${idle.length === 1 ? 'has' : 'have'} no virtual interfaces and no gateway associations, so ${idle.length === 1 ? 'it carries' : 'they carry'} no traffic. An empty gateway is harmless but it counts against the per-account gateway quota and it makes the topology harder to reason about — a reader cannot tell a decommissioned gateway from one that is half-built. Delete it, or record what it is reserved for.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
+// --- Rule: jumbo frames available but not configured ---
+// `jumboFrameCapable` is the path's capability; `mtu` is what the VIF asked for.
+// Capable-but-1500 is a free throughput improvement, but changing MTU resets the
+// BGP session, so this is planning guidance rather than an urgent finding.
+
+// --- Rule: inconsistent BGP MD5 authentication ---
+// Graded on PRESENCE only; `hasAuthKey` is a boolean because the API returns the
+// live secret and it must never enter the store, a snapshot, or the chat context.
+// Inconsistency is the finding: an estate that authenticates 8 of 10 sessions
+// made a decision and then missed two, which is a different problem from one
+// that authenticates none.
+
+// --- Rule: recent AWS-reported Direct Connect issue ---
+// Distinct from the maintenance calendar and from driver 1 of the executive
+// summary, both of which deliberately handle only `scheduledChange`. An `issue`
+// is a fault AWS has already confirmed on this account's own resources, and
+// before this rule it reached the user solely as a coloured dot on the calendar.
+//
+// `ACCOUNT_SPECIFIC` is the load-bearing scope: AWS asserts THIS account was
+// affected. `PUBLIC` events are broadcast region-wide regardless of footprint and
+// are already filtered upstream, so they are skipped here too.
+export function ruleRecentAwsIssue(topology: TopologyData): RuleResult {
+  const issues = (topology.maintenanceEvents ?? []).filter(
+    (e) => e.eventTypeCategory === 'issue' && e.eventScopeCode !== 'PUBLIC',
+  );
+  if (issues.length === 0) return { annotations: [], recommendation: null };
+
+  const ours = new Set<string>([
+    ...topology.connections.map((c) => c.connectionId),
+    ...topology.virtualInterfaces.map((v) => v.virtualInterfaceId),
+  ]);
+
+  const described = issues.map((e) => {
+    const named = (e.affectedResourceIds ?? []).filter((id) => ours.has(id));
+    const when = e.startTime ? e.startTime.slice(0, 10) : 'date not reported';
+    const state = e.statusCode?.toLowerCase() === 'closed' ? 'resolved' : 'ongoing';
+    const scope = named.length > 0
+      ? named.join(', ')
+      : e.eventScopeCode === 'ACCOUNT_SPECIFIC'
+        ? 'this account, resources not itemised by AWS'
+        : 'scope not reported by AWS';
+    return { text: `${e.eventTypeCode} in ${e.region} on ${when} (${state}) — ${scope}`, ongoing: state === 'ongoing' };
+  });
+
+  const anyOngoing = described.some((d) => d.ongoing);
+  const repeats = issues.length > 1;
+
+  return {
+    annotations: [],
+    recommendation: {
+      id: 'bp-recent-aws-issue',
+      ruleId: 'recent-aws-issue',
+      category: 'bestpractice',
+      severity: anyOngoing || repeats ? 'warning' : 'info',
+      title: anyOngoing
+        ? 'AWS is reporting an ongoing Direct Connect issue on this account'
+        : `AWS reported ${issues.length} Direct Connect issue${issues.length === 1 ? '' : 's'} on this account`,
+      description: `AWS Health has ${issues.length} Direct Connect issue event${issues.length === 1 ? '' : 's'} for this account: ${described.map((d) => d.text).join('; ')}.${repeats ? ' More than one event in the lookback window makes this a pattern rather than an isolated fault, and it is the strongest available argument for adding a second location or provider.' : ''}${anyOngoing ? ' An ongoing event means the fault is live now — check the path before treating any other finding here as the cause of a current problem.' : ' These are resolved, but they are evidence the path has already failed once: prioritise redundancy findings on the affected resources over identical findings elsewhere.'} Full detail is in the AWS Health Dashboard.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    },
+  };
+}
+
 // --- Rule: Documented failover runbooks (guidance-only) ---
 export function ruleFailoverRunbooks(topology: TopologyData): RuleResult {
   if (topology.connections.length === 0 && topology.virtualInterfaces.length === 0) {
@@ -1418,6 +1912,13 @@ export function getAllBestPracticeResults(topology: TopologyData): {
     ruleVifRateLimitOversubscription(topology),
     ruleLagMinLinks(topology),
     ruleBgpRouteLimit(topology),
+    ruleBgpPrefixChurn(topology),
+    ruleWeakestPrefixAllocation(topology),
+    ruleConnectionPrefixPoolExhausted(topology),
+    ruleSharedLogicalDevice(topology),
+    ruleConnectionLogicalRedundancy(topology),
+    ruleUnusedDxGateway(topology),
+    ruleRecentAwsIssue(topology),
     ruleBgpSessionStability(topology),
     ruleDxgwPropagationEnabled(topology),
     ruleBlackholeRoutes(topology),

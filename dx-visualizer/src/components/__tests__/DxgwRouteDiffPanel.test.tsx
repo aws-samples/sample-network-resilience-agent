@@ -249,7 +249,9 @@ describe('DxgwRouteDiffPanel', () => {
       'vif-b': ['10.30.1.0/24', '10.30.2.0/24'],
     }));
     const cell = screen.getByTitle(/vif-b carries only part of 10\.30\.0\.0\/16/);
-    expect(cell.textContent).toBe('◐');
+    // △ partial, distinct from × absent. The panel shares this four-mark set with
+    // the exported report (CELL_MARK in useExportReport.ts) — if one moves, both do.
+    expect(cell.textContent).toBe('△');
     // The tooltip has to name the pieces, or "partly" is not actionable.
     expect(cell.getAttribute('title')).toMatch(/10\.30\.1\.0\/24, 10\.30\.2\.0\/24/);
     expect(screen.getByRole('status').textContent).toMatch(/only partly carried by another VIF/);

@@ -93,10 +93,12 @@ describe('fetchVirtualInterfaces pagination', () => {
       virtualInterfaces: [{
         virtualInterfaceId: 'dxvif-pub',
         virtualInterfaceType: 'public',
+        addressFamily: 'ipv4',
         routeFilterPrefixes: [{ cidr: '203.0.113.0/24' }, {}],
       }],
     });
     const out = await fetchVirtualInterfaces(client);
+    expect(out[0].addressFamily).toBe('ipv4');
     expect(out[0].routeFilterPrefixes).toEqual([{ cidr: '203.0.113.0/24' }]);
   });
 });

@@ -219,28 +219,6 @@ export function ruleSingleVgw(topology: TopologyData): Recommendation | null {
   };
 }
 
-export function ruleNoLag(topology: TopologyData): Recommendation | null {
-  if (topology.lags.length > 0) return null;
-  if (topology.connections.length < 2) return null;
-
-  const locationConnections = new Map<string, number>();
-  for (const conn of topology.connections) {
-    locationConnections.set(conn.location, (locationConnections.get(conn.location) ?? 0) + 1);
-  }
-
-  if (![...locationConnections.values()].some((c) => c >= 2)) return null;
-
-  return {
-    id: 'rec-no-lag',
-    ruleId: 'no-lag',
-    category: 'resiliency',
-    severity: 'info',
-    title: 'Consider Using LAG Groups',
-    description: 'Link Aggregation Groups can bundle multiple connections for simplified management.',
-    additionalNodes: [],
-    additionalEdges: [],
-  };
-}
 
 /**
  * LAG resiliency rule — recommends adding LAGs and/or DX locations to reach

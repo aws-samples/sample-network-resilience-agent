@@ -4,7 +4,6 @@ import {
   ruleSingleConnectionPerLocation,
   ruleNoTgw,
   ruleSingleVgw,
-  ruleNoLag,
   ruleLagResiliency,
 } from '../resiliency-rules';
 import { makeEmptyTopology } from './helpers';
@@ -176,43 +175,6 @@ describe('ruleSingleVgw', () => {
       { vpnGatewayId: 'vgw-2', tags: {} } as any,
     ];
     expect(ruleSingleVgw(t)).toBeNull();
-  });
-});
-
-describe('ruleNoLag', () => {
-  it('returns null when LAGs exist', () => {
-    const t = makeEmptyTopology();
-    t.lags = [{ lagId: 'lag-1', tags: {} } as any];
-    expect(ruleNoLag(t)).toBeNull();
-  });
-
-  it('returns null when fewer than 2 connections', () => {
-    const t = makeEmptyTopology();
-    t.connections = [
-      { connectionId: 'c1', location: 'EqDC2', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
-    ];
-    expect(ruleNoLag(t)).toBeNull();
-  });
-
-  it('returns recommendation when 2+ connections at same location and no LAGs', () => {
-    const t = makeEmptyTopology();
-    t.connections = [
-      { connectionId: 'c1', location: 'EqDC2', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
-      { connectionId: 'c2', location: 'EqDC2', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
-    ];
-    const rec = ruleNoLag(t);
-    expect(rec).not.toBeNull();
-    expect(rec!.ruleId).toBe('no-lag');
-    expect(rec!.severity).toBe('info');
-  });
-
-  it('returns null when connections are at different locations (no location has 2+)', () => {
-    const t = makeEmptyTopology();
-    t.connections = [
-      { connectionId: 'c1', location: 'EqDC2', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
-      { connectionId: 'c2', location: 'EqDC6', connectionState: 'available', bandwidth: '1Gbps', tags: {} } as any,
-    ];
-    expect(ruleNoLag(t)).toBeNull();
   });
 });
 

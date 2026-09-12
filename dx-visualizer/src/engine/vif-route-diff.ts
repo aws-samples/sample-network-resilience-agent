@@ -199,8 +199,17 @@ export interface DxgwRouteDiff {
   totalSharedSite: number;
 }
 
-/** Deduplicate by prefix — the same CIDR twice on one VIF would double every row. */
-function uniqueByCidr(routes: VifRoute[]): VifRoute[] {
+/**
+ * Deduplicate by prefix — the same CIDR twice on one VIF would double every row.
+ *
+ * `ListVirtualInterfaceRoutes` returns one entry per *installed* route, and a
+ * prefix installed on more than one AWS logical device appears once per device.
+ * Exported because `acceptedByFamily` counts the same list to grade the prefix
+ * quota: when only this file deduped, the route-diff matrix and the quota check
+ * disagreed, and the quota check reported a VIF at 220% of a limit that AWS
+ * would have torn the session down for long before.
+ */
+export function uniqueByCidr(routes: VifRoute[]): VifRoute[] {
   const seen = new Set<string>();
   const out: VifRoute[] = [];
   for (const rt of routes) {

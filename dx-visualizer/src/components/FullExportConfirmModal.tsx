@@ -1,16 +1,44 @@
 import { useIsLight } from '../hooks/useTheme';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 
+const SNAPSHOT_CONTENTS = [
+  'AWS account IDs',
+  'Resource IDs (VPC, TGW, DXGW, VIF, etc.)',
+  'IPs and CIDR blocks',
+  'Resource names, descriptions, and tags',
+];
+
 interface Props {
   onCancel: () => void;
   onConfirm: () => void;
+  /**
+   * Copy overrides for a second unredacted artifact. They default to the
+   * snapshot wording, so the original call site is unchanged.
+   *
+   * The report needed its own text rather than a second modal: the two artifacts
+   * differ in what they carry (a report has findings and prose, not a machine
+   * -readable topology) and in what the safe alternative is — a snapshot has
+   * "Sanitized" next to it in the same menu, a report is made safe by turning on
+   * redact mode first, which the reader has to be told.
+   */
+  title?: string;
+  description?: string;
+  contents?: string[];
+  confirmLabel?: string;
 }
 
-// Confirmation modal that gates the unsanitized "Full data" export. Replaces
-// the native window.confirm() so the warning matches the rest of the app's
-// design language and can carry richer styling (warning chip, list of what
-// the file will contain).
-export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
+// Confirmation modal that gates an unsanitized export. Replaces the native
+// window.confirm() so the warning matches the rest of the app's design language
+// and can carry richer styling (warning chip, list of what the file will
+// contain).
+export function FullExportConfirmModal({
+  onCancel,
+  onConfirm,
+  title = 'Export full data?',
+  description = 'The exported file will contain real customer data and is not safe to share publicly.',
+  contents = SNAPSHOT_CONTENTS,
+  confirmLabel = 'Export full data',
+}: Props) {
   const light = useIsLight();
   const trapRef = useFocusTrap(true, onCancel);
 
@@ -71,7 +99,7 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
                 light ? 'text-slate-800' : 'text-white'
               }`}
             >
-              Export full data?
+              {title}
             </h2>
             <p
               id="full-export-desc"
@@ -79,8 +107,7 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
                 light ? 'text-slate-600' : 'text-slate-400'
               }`}
             >
-              The exported file will contain real customer data and is not safe
-              to share publicly.
+              {description}
             </p>
           </div>
         </div>
@@ -94,10 +121,9 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
             File will include:
           </div>
           <ul className="space-y-0.5 ml-3.5 list-disc">
-            <li>AWS account IDs</li>
-            <li>Resource IDs (VPC, TGW, DXGW, VIF, etc.)</li>
-            <li>IPs and CIDR blocks</li>
-            <li>Resource names, descriptions, and tags</li>
+            {contents.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
           </ul>
           <div className="mt-2 italic">
             Only continue if you trust where the file is going.
@@ -125,7 +151,7 @@ export function FullExportConfirmModal({ onCancel, onConfirm }: Props) {
             onClick={onConfirm}
             className="px-3.5 py-1.5 text-[12px] font-semibold rounded-lg transition-colors bg-amber-500 text-white hover:bg-amber-600 shadow-sm"
           >
-            Export full data
+            {confirmLabel}
           </button>
         </div>
       </div>

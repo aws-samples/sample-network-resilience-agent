@@ -1,6 +1,6 @@
 {
   "name": "resilience-agent-sso-backend",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "tsx watch src/dev.ts",
     "build": "esbuild src/lambda.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-sso": "^3.1107.0",
@@ -25,6 +26,7 @@
     "@types/node": "^25.9.1",
     "esbuild": "^0.28.1",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.0"
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.8"
   }
 }

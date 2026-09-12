@@ -45,35 +45,77 @@ export function getUsedLocations(topology: TopologyData): Set<string> {
  * should call this helper rather than counting raw `topology.connections`.
  */
 export function getLocationDeviceCounts(topology: TopologyData): Map<string, number> {
-  const locationDevices = new Map<string, Set<string>>();
+  const counts = new Map<string, number>();
+  for (const [loc, links] of getLocationLinkCounts(topology)) counts.set(loc, links.devices);
+  return counts;
+}
 
-  const addDevice = (loc: string, deviceKey: string) => {
+export interface LocationLinkCounts {
+  /** Connections landing at this location (inferred from VIFs when none are owned). */
+  connections: number;
+  /** Distinct AWS logical devices those connections terminate on. */
+  devices: number;
+}
+
+/**
+ * Connections *and* distinct logical devices per DX location, in one pass.
+ *
+ * `getLocationDeviceCounts` is derived from this rather than the other way round,
+ * so the two can never key locations differently or disagree about which
+ * connections a location owns.
+ *
+ * Both numbers are needed to describe an asymmetric estate. "3 connections across
+ * 2 locations" is equally true of a 2+1 split and a 1+2 split, and it is also true
+ * when both links at the busy location land on the *same* AWS device — which is
+ * not device redundancy at all, even though the connection count says otherwise.
+ * Reporting devices alone hides the reverse case: one device carrying two
+ * connections is a fully provisioned location as far as bandwidth goes.
+ */
+export function getLocationLinkCounts(topology: TopologyData): Map<string, LocationLinkCounts> {
+  const locationDevices = new Map<string, Set<string>>();
+  // Connections are counted as DISTINCT ids, not as loop iterations: in the
+  // hosted-VIF fallback several VIFs can share one physical link, and counting
+  // each VIF would report a single-link location as redundant.
+  const locationConnIds = new Map<string, Set<string>>();
+
+  const add = (loc: string, deviceKey: string, connKey: string) => {
     if (!loc) return;
-    let set = locationDevices.get(loc);
-    if (!set) {
-      set = new Set();
-      locationDevices.set(loc, set);
+    let devices = locationDevices.get(loc);
+    if (!devices) {
+      devices = new Set();
+      locationDevices.set(loc, devices);
     }
-    set.add(deviceKey);
+    devices.add(deviceKey);
+    let conns = locationConnIds.get(loc);
+    if (!conns) {
+      conns = new Set();
+      locationConnIds.set(loc, conns);
+    }
+    conns.add(connKey);
   };
 
   if (topology.connections.length > 0) {
     for (const conn of topology.connections) {
       const vif = topology.virtualInterfaces.find((v) => v.connectionId === conn.connectionId);
       const deviceKey = conn.awsLogicalDeviceId || vif?.awsLogicalDeviceId || conn.connectionId;
-      addDevice(conn.location, deviceKey);
+      add(conn.location, deviceKey, conn.connectionId);
     }
   } else {
     // Fallback: no owned connections — infer from VIFs (hosted-VIF accounts).
     for (const vif of topology.virtualInterfaces) {
       const deviceKey = vif.awsLogicalDeviceId || vif.connectionId || vif.virtualInterfaceId;
-      addDevice(vif.location ?? '', deviceKey);
+      add(vif.location ?? '', deviceKey, vif.connectionId || vif.virtualInterfaceId);
     }
   }
 
-  const counts = new Map<string, number>();
-  for (const [loc, set] of locationDevices) counts.set(loc, set.size);
-  return counts;
+  const out = new Map<string, LocationLinkCounts>();
+  for (const [loc, devices] of locationDevices) {
+    out.set(loc, {
+      connections: locationConnIds.get(loc)?.size ?? devices.size,
+      devices: devices.size,
+    });
+  }
+  return out;
 }
 
 /**

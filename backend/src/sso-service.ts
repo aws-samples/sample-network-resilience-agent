@@ -11,6 +11,15 @@ import {
   GetRoleCredentialsCommand,
 } from '@aws-sdk/client-sso';
 
+// Hard page ceiling for every paginated SSO call below. A response that hands
+// back a non-empty nextToken on every page — a malformed or hostile endpoint —
+// otherwise loops until the Lambda times out, with the accumulator growing the
+// whole time. 1000 is generous by orders of magnitude: ListAccounts returns up
+// to 100 accounts per page and ListAccountRoles up to 100 roles, so this allows
+// ~100k of either, far beyond any Identity Center assignment set. Breaching it
+// means the API is misbehaving, not that a real tenant is large.
+const MAX_PAGES = 1000;
+
 function createOidcClient(ssoRegion: string) {
   return new SSOOIDCClient({
     region: ssoRegion,
@@ -101,6 +110,7 @@ export async function listAccounts(ssoRegion: string, accessToken: string) {
   const client = createSsoClient(ssoRegion);
   const accounts: { accountId: string; accountName: string; emailAddress: string }[] = [];
   let nextToken: string | undefined;
+  let pages = 0;
 
   do {
     const resp = await client.send(
@@ -114,6 +124,10 @@ export async function listAccounts(ssoRegion: string, accessToken: string) {
       });
     }
     nextToken = resp.nextToken;
+    pages += 1;
+    if (nextToken && pages >= MAX_PAGES) {
+      throw new Error(`SSO ListAccounts exceeded ${MAX_PAGES} pages — aborting pagination.`);
+    }
   } while (nextToken);
 
   return accounts;
@@ -127,6 +141,7 @@ export async function listAccountRoles(
   const client = createSsoClient(ssoRegion);
   const roles: { roleName: string; accountId: string }[] = [];
   let nextToken: string | undefined;
+  let pages = 0;
 
   do {
     const resp = await client.send(
@@ -139,6 +154,10 @@ export async function listAccountRoles(
       });
     }
     nextToken = resp.nextToken;
+    pages += 1;
+    if (nextToken && pages >= MAX_PAGES) {
+      throw new Error(`SSO ListAccountRoles exceeded ${MAX_PAGES} pages — aborting pagination.`);
+    }
   } while (nextToken);
 
   return roles;

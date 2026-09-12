@@ -25,3 +25,19 @@ CLAUDE.md
 .qdeveloper/
 .cline/
 .clinerules
+
+# Exported artefacts. An HTML report or rule-catalog workbook carries real account
+# IDs, resource IDs, IPs and CIDRs unless redact mode was on when it was produced,
+# and nothing in .github-sync-exclude covers *.html or *.xlsx — so one stray
+# `git add -A` would push a customer's estate to GitLab and the next promotion
+# would publish it to the PUBLIC GitHub mirror.
+dx-resilience-*.html
+NWRA-Rule-Catalog-*.xlsx
+# Excel's lock file for an open workbook.
+~$*.xlsx
+
+# Local-only working directories. Anchored with a leading slash: a bare `scripts/`
+# also matches the TRACKED dx-visualizer/skills/nwra-skill/skill/scripts/, which
+# would quietly ignore new files in the vendored skill bundle.
+/.worktrees/
+/scripts/
