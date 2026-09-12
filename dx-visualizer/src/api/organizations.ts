@@ -1,37 +1,8 @@
-import { DescribeAccountCommand, ListAccountsCommand } from '@aws-sdk/client-organizations';
+import { DescribeAccountCommand } from '@aws-sdk/client-organizations';
 import { AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { ListAccountAliasesCommand } from '@aws-sdk/client-iam';
 import type { AwsCredentials } from '../types/aws-resources';
 import { createIamClient, createOrganizationsClient, createStsClient } from './aws-client';
-
-export interface OrgAccount {
-  accountId: string;
-  accountName: string;
-  status: string;
-}
-
-/** List all active accounts in the AWS Organization. */
-export async function listOrgAccounts(creds: AwsCredentials): Promise<OrgAccount[]> {
-  const client = createOrganizationsClient(creds);
-  const accounts: OrgAccount[] = [];
-  let nextToken: string | undefined;
-
-  do {
-    const res = await client.send(new ListAccountsCommand({ NextToken: nextToken }));
-    for (const a of res.Accounts ?? []) {
-      if (a.Status === 'ACTIVE' && a.Id) {
-        accounts.push({
-          accountId: a.Id,
-          accountName: a.Name ?? a.Id,
-          status: a.Status,
-        });
-      }
-    }
-    nextToken = res.NextToken;
-  } while (nextToken);
-
-  return accounts;
-}
 
 /**
  * Resolve a friendly name for the caller's account.

@@ -1,5 +1,5 @@
 import type { AwsCredentials, DxConnection } from '../types/aws-resources';
-import type { TopologyData } from '../types/topology';
+import type { TopologyData, FetchIssue, FetchIssueKind } from '../types/topology';
 import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { createDxClient, createEc2Client, createNetworkManagerClient, createSsmClient, createStsClient } from './aws-client';
 import { fetchRegionNames } from './regions';
@@ -18,19 +18,42 @@ import { assumeRoleInAccount } from './organizations';
 import { fetchBgpPrefixMetrics } from './cloudwatch-dx';
 import { fetchDxMaintenanceEvents } from './health-dx';
 
-function logged<T>(name: string, promise: Promise<T[]>, errors: string[]): Promise<T[]> {
+/**
+ * Run one resource fetch, recording failure instead of aborting the load.
+ *
+ * Returning `[]` on failure is deliberate — one dead service should not blank
+ * the whole topology — but it means the caller cannot tell "this account has no
+ * route tables" from "the route-table call was denied". So every failure is
+ * also pushed onto `issues`, which now RIDES OUT on `TopologyData.fetchIssues`
+ * and drives a persistent banner. Before that it was recorded and dropped, and
+ * a permissions gap rendered as a clean, complete-looking topology.
+ */
+function logged<T>(name: string, promise: Promise<T[]>, issues: FetchIssue[]): Promise<T[]> {
   return promise
     .then((res) => { console.log(`[AWS] ${name}: ${res.length} items`); return res; })
     .catch((err) => {
       const msg = err.message || String(err);
       console.error(`[AWS] ${name} FAILED:`, msg);
-      errors.push(`${name}: ${msg}`);
+      issues.push({ label: name, kind: 'failed', message: msg });
       return [] as T[];
     });
 }
 
+/**
+ * Record a partial result — data arrived, but a cap stopped the rest.
+ *
+ * Separate from `logged()` because the distinction matters to the reader:
+ * `failed` means the resource is absent, `truncated` means what is shown is
+ * real but incomplete. Used by the paths that deliberately choose
+ * `onLimit: 'truncate'` (AWS Health) and by the per-region catches that
+ * previously only reached the console (CloudWatch).
+ */
+function noteIssue(issues: FetchIssue[], label: string, kind: FetchIssueKind, message: string) {
+  issues.push({ label, kind, message });
+}
+
 export async function fetchAllTopologyData(creds: AwsCredentials): Promise<TopologyData> {
-  const fetchErrors: string[] = [];
+  const fetchIssues: FetchIssue[] = [];
 
   // --- Phase 1: Fetch global services (DX Gateways, Cloud WAN, Locations) ---
   // These APIs are global and work from any region.
@@ -52,10 +75,10 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
 
   const [dxGateways, cloudWanCoreNetworks, cloudWanAttachments, cloudWanPeerings] =
     await Promise.all([
-      logged('DxGateways', fetchDxGateways(dxClient), fetchErrors),
-      logged('CloudWanCoreNetworks', fetchCoreNetworks(nmClient), fetchErrors),
-      logged('CloudWanAttachments', fetchCloudWanAttachments(nmClient), fetchErrors),
-      logged('CloudWanPeerings', fetchCloudWanPeerings(nmClient), fetchErrors),
+      logged('DxGateways', fetchDxGateways(dxClient), fetchIssues),
+      logged('CloudWanCoreNetworks', fetchCoreNetworks(nmClient), fetchIssues),
+      logged('CloudWanAttachments', fetchCloudWanAttachments(nmClient), fetchIssues),
+      logged('CloudWanPeerings', fetchCloudWanPeerings(nmClient), fetchIssues),
     ]);
 
   // --- Phase 2: Fetch DX GW associations, Cloud WAN routes, AND default region in parallel ---
@@ -65,19 +88,19 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
     const regionDx = createDxClient(regionCreds);
     const regionEc2 = createEc2Client(regionCreds);
     const [rConns, rVifs, rLags, rLocs, rVpcs, rVpnGw, rTgws, rTgwAtt, rTgwPeering, rVpcPeerings, rVpnConns, rCgws, rVpcRouteTables] = await Promise.all([
-      logged(`${region}/Connections`, fetchConnections(regionDx), fetchErrors),
-      logged(`${region}/VirtualInterfaces`, fetchVirtualInterfaces(regionDx), fetchErrors),
-      logged(`${region}/Lags`, fetchLags(regionDx), fetchErrors),
-      logged(`${region}/Locations`, fetchLocations(regionDx), fetchErrors),
-      logged(`${region}/VPCs`, fetchVpcs(regionEc2, region), fetchErrors),
-      logged(`${region}/VpnGateways`, fetchVpnGateways(regionEc2), fetchErrors),
-      logged(`${region}/TransitGateways`, fetchTransitGateways(regionEc2), fetchErrors),
-      logged(`${region}/TGWAttachments`, fetchTransitGatewayAttachments(regionEc2), fetchErrors),
-      logged(`${region}/TGWPeeringAttachments`, fetchTransitGatewayPeeringAttachments(regionEc2), fetchErrors),
-      logged(`${region}/VpcPeerings`, fetchVpcPeeringConnections(regionEc2, region), fetchErrors),
-      logged(`${region}/VpnConnections`, fetchVpnConnections(regionEc2), fetchErrors),
-      logged(`${region}/CustomerGateways`, fetchCustomerGateways(regionEc2), fetchErrors),
-      logged(`${region}/VpcRouteTables`, fetchVpcRouteTables(regionEc2), fetchErrors),
+      logged(`${region}/Connections`, fetchConnections(regionDx), fetchIssues),
+      logged(`${region}/VirtualInterfaces`, fetchVirtualInterfaces(regionDx), fetchIssues),
+      logged(`${region}/Lags`, fetchLags(regionDx), fetchIssues),
+      logged(`${region}/Locations`, fetchLocations(regionDx), fetchIssues),
+      logged(`${region}/VPCs`, fetchVpcs(regionEc2, region), fetchIssues),
+      logged(`${region}/VpnGateways`, fetchVpnGateways(regionEc2), fetchIssues),
+      logged(`${region}/TransitGateways`, fetchTransitGateways(regionEc2), fetchIssues),
+      logged(`${region}/TGWAttachments`, fetchTransitGatewayAttachments(regionEc2), fetchIssues),
+      logged(`${region}/TGWPeeringAttachments`, fetchTransitGatewayPeeringAttachments(regionEc2), fetchIssues),
+      logged(`${region}/VpcPeerings`, fetchVpcPeeringConnections(regionEc2, region), fetchIssues),
+      logged(`${region}/VpnConnections`, fetchVpnConnections(regionEc2), fetchIssues),
+      logged(`${region}/CustomerGateways`, fetchCustomerGateways(regionEc2), fetchIssues),
+      logged(`${region}/VpcRouteTables`, fetchVpcRouteTables(regionEc2), fetchIssues),
     ]);
     // Fetch TGW route tables in parallel for each TGW in this region
     const rTgwRouteTables = new Map<string, import('../types/aws-resources').TgwRouteTableWithRoutes[]>();
@@ -90,7 +113,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
         // never enabled — the silent DX blackhole. A missing
         // ec2:GetTransitGatewayRouteTablePropagations degrades that table's
         // `propagations` to undefined rather than failing the fetch.
-        const routes = await logged(`${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(regionEc2, tgw.transitGatewayId, true), fetchErrors);
+        const routes = await logged(`${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(regionEc2, tgw.transitGatewayId, true), fetchIssues);
         if (routes.length > 0) rTgwRouteTables.set(tgw.transitGatewayId, routes);
       })
     );
@@ -102,7 +125,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
     // DX Gateway associations (fan out per gateway, already parallel)
     Promise.all(
       dxGateways.map((g) =>
-        logged(`DxGwAssoc(${g.directConnectGatewayId})`, fetchDxGatewayAssociations(dxClient, g.directConnectGatewayId), fetchErrors)
+        logged(`DxGwAssoc(${g.directConnectGatewayId})`, fetchDxGatewayAssociations(dxClient, g.directConnectGatewayId), fetchIssues)
       )
     ).then((results) => results.flat()),
     // Cloud WAN routes
@@ -117,7 +140,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
     // Cloud WAN breadcrumbs to discover other regions from, so sweep every
     // enabled region. Denied ec2:DescribeRegions degrades to [] via logged(),
     // falling back to the DX/Cloud-WAN-seeded discovery below.
-    logged('EnabledRegions', fetchEnabledRegions(createEc2Client(creds)), fetchErrors),
+    logged('EnabledRegions', fetchEnabledRegions(createEc2Client(creds)), fetchIssues),
   ]);
 
   // --- Phase 3: Discover additional regions and fetch them ---
@@ -159,7 +182,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
   const allFetchedResults = [defaultRegionResult, ...extraRegionResults];
   const fetchedRegions = new Set([creds.region, ...discoveredRegions]);
   const attachmentRegionSets = await Promise.all(
-    dxGateways.map((g) => logged(`DxGwAttachmentRegions(${g.directConnectGatewayId})`, fetchDxGatewayAttachmentRegions(dxClient, g.directConnectGatewayId), fetchErrors))
+    dxGateways.map((g) => logged(`DxGwAttachmentRegions(${g.directConnectGatewayId})`, fetchDxGatewayAttachmentRegions(dxClient, g.directConnectGatewayId), fetchIssues))
   );
   const missingRegions = new Set<string>();
   for (const regions of attachmentRegionSets) {
@@ -297,7 +320,11 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
   // service returning a malformed response) are logged but not fatal — the
   // app continues with whatever data we did fetch.
   const authPattern = /credential|Unauthorized|InvalidIdentityToken|ExpiredToken|SignatureDoesNotMatch|AccessDenied/i;
-  const authError = fetchErrors.find((e) => authPattern.test(e));
+  // Matches on `message`, not on the whole record: the label carries region and
+  // resource names, and an account or gateway id containing "AccessDenied" as a
+  // substring is far-fetched — but testing the message is what was always meant,
+  // and it stops a future label format from silently widening this heuristic.
+  const authError = fetchIssues.find((i) => authPattern.test(i.message));
   if (authError && effectiveConnections.length === 0 && dxGateways.length === 0 && vpcs.length === 0) {
     throw new Error('Invalid AWS credentials. Please check your Access Key ID and Secret Access Key.');
   }
@@ -310,11 +337,27 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
   // Live overlay calls fetchUtilizationOnDemand() below.
   const [bgpPrefixMetrics, maintenanceEvents] = await Promise.all([
     fetchBgpPrefixMetrics(creds, virtualInterfaces).catch((err) => {
-      console.warn('[AWS] BGP prefix metrics FAILED:', err instanceof Error ? err.message : err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[AWS] BGP prefix metrics FAILED:', msg);
+      // Recorded, not just warned. An empty metrics map silently disables the
+      // BGP-prefix-quota rule, so a CloudWatch permissions gap otherwise looks
+      // like every VIF being comfortably under its prefix limit.
+      noteIssue(fetchIssues, 'CloudWatch/BgpPrefixMetrics', 'failed', msg);
       return new Map() as NonNullable<TopologyData['bgpPrefixMetrics']>;
     }),
-    fetchDxMaintenanceEvents(creds).catch((err) => {
-      console.warn('[AWS] Health events FAILED:', err instanceof Error ? err.message : err);
+    fetchDxMaintenanceEvents(creds, (label, maxPages) =>
+      // Health deliberately truncates rather than throwing, so this is the only
+      // way the calendar's incompleteness becomes visible outside the console.
+      noteIssue(
+        fetchIssues,
+        label,
+        'truncated',
+        `stopped after ${maxPages} pages; older entries are not shown`,
+      ),
+    ).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[AWS] Health events FAILED:', msg);
+      noteIssue(fetchIssues, 'Health/MaintenanceEvents', 'failed', msg);
       return [] as NonNullable<TopologyData['maintenanceEvents']>;
     }),
   ]);
@@ -388,10 +431,10 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
           [creds.region, ...discoveredRegions].map(async (region) => {
             const spokeEc2 = createEc2Client({ ...spokeCreds, region });
             const [rVpcs, rTgws, rTgwAtt, rVpcRts] = await Promise.all([
-              logged(`${accountId}/${region}/VPCs`, fetchVpcs(spokeEc2, region), fetchErrors),
-              logged(`${accountId}/${region}/TGWs`, fetchTransitGateways(spokeEc2), fetchErrors),
-              logged(`${accountId}/${region}/TGWAttachments`, fetchTransitGatewayAttachments(spokeEc2), fetchErrors),
-              logged(`${accountId}/${region}/VpcRouteTables`, fetchVpcRouteTables(spokeEc2), fetchErrors),
+              logged(`${accountId}/${region}/VPCs`, fetchVpcs(spokeEc2, region), fetchIssues),
+              logged(`${accountId}/${region}/TGWs`, fetchTransitGateways(spokeEc2), fetchIssues),
+              logged(`${accountId}/${region}/TGWAttachments`, fetchTransitGatewayAttachments(spokeEc2), fetchIssues),
+              logged(`${accountId}/${region}/VpcRouteTables`, fetchVpcRouteTables(spokeEc2), fetchIssues),
             ]);
             // Fetch TGW route tables for each spoke TGW
             const rTgwRoutes = new Map<string, import('../types/aws-resources').TgwRouteTableWithRoutes[]>();
@@ -401,7 +444,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
                 // the assumed NetworkReadOnlyRole is out of our control and is
                 // unlikely to grant the newer Get* action, so this would add a
                 // guaranteed-noisy failure per route table for no signal.
-                const routes = await logged(`${accountId}/${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(spokeEc2, tgw.transitGatewayId), fetchErrors);
+                const routes = await logged(`${accountId}/${region}/TGWRoutes(${tgw.transitGatewayId.slice(-8)})`, fetchTgwRouteTablesWithRoutes(spokeEc2, tgw.transitGatewayId), fetchIssues);
                 if (routes.length > 0) rTgwRoutes.set(tgw.transitGatewayId, routes);
               })
             );
@@ -462,6 +505,18 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
       }
     }
     console.log(`[AWS] Enriched from spoke accounts: ${enrichedVpcs} VPCs, ${enrichedTgws} TGWs, ${enrichedTgwAtts} TGW attachments, ${enrichedVpcRts} VPC route tables`);
+  }
+
+  // Attach last, so it captures issues from every phase including the spoke-
+  // account enrichment above. Only set when non-empty: an empty array and
+  // `undefined` both mean "nothing known to have failed", and leaving the field
+  // off keeps a clean fetch byte-identical to what snapshots produced before
+  // this existed.
+  if (fetchIssues.length > 0) {
+    topology.fetchIssues = fetchIssues;
+    console.warn(
+      `[AWS] Topology loaded with ${fetchIssues.length} issue(s): ${fetchIssues.map((i) => i.label).join(', ')}`,
+    );
   }
 
   return topology;

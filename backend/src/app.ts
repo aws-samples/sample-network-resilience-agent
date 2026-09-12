@@ -9,6 +9,7 @@ import {
   listAccountRoles,
   getRoleCredentials,
 } from './sso-service.js';
+import { validateSsoInput } from './validate.js';
 
 export const app = express();
 
@@ -64,6 +65,9 @@ function friendlyError(err: unknown): string {
   if (e.name === 'UnauthorizedClientException') {
     return 'SSO client is not authorized. Check your Start URL and region.';
   }
+  // validateSsoInput now rejects malformed regions at the edge, so this branch
+  // is mostly reached by genuine network failures (DNS/egress) rather than by a
+  // bad `ssoRegion`. Kept for those.
   if (e.code === 'ENOTFOUND' || e.code === 'ERR_INVALID_URL') {
     return 'Could not reach AWS SSO endpoint. Check that the selected region is correct.';
   }
@@ -76,6 +80,12 @@ function friendlyError(err: unknown): string {
 
 // Server-side store for OIDC client secrets – never sent to the browser.
 // Entries are evicted on successful token exchange, on expiry, or after a TTL.
+//
+// This Map is per-process, so under Lambda it is per warm container. A /poll
+// that lands on a different container than the /start which created the secret
+// finds nothing and returns the user-visible 400 'Unknown clientId. Please
+// restart the SSO flow.' (below). That fails CLOSED — correct — but it does
+// drive client retries and restarts of the device-auth flow.
 const clientSecrets = new Map<string, string>();
 const CLIENT_SECRET_TTL_MS = 15 * 60 * 1000; // covers the SSO device-auth window
 
@@ -87,7 +97,13 @@ function rememberClientSecret(clientId: string, clientSecret: string) {
 // Per-clientId minimum interval between /auth/sso/poll calls. AWS returns an
 // `interval` (seconds) from StartDeviceAuthorization; polling faster than that
 // is what produces SlowDownException. We enforce it server-side so a buggy or
-// malicious frontend can't exhaust SSO OIDC quota.
+// malicious frontend is slowed down.
+//
+// Scope, precisely: `lastPollAt` is in-process, so this throttle is PER WARM
+// CONTAINER. With N concurrent Lambda containers the effective ceiling is N ×
+// one poll per POLL_MIN_INTERVAL_MS, not one poll per interval overall. The
+// global bound is API Gateway throttling (SsoApi DefaultRouteSettings in
+// template.yaml) — this is application-layer defence-in-depth on top of it.
 const POLL_MIN_INTERVAL_MS = 5_000;
 const lastPollAt = new Map<string, number>();
 setInterval(() => {
@@ -95,10 +111,21 @@ setInterval(() => {
   for (const [id, ts] of lastPollAt) if (ts < cutoff) lastPollAt.delete(id);
 }, 5 * 60 * 1000).unref?.();
 
+// Both `.unref?.()` timers above (the per-secret setTimeout and this sweep) run
+// on the container's event loop, which Lambda freezes between invocations. They
+// therefore do not fire on schedule — CLIENT_SECRET_TTL_MS eviction is
+// best-effort, an upper bound on intent rather than a guarantee. The container
+// being torn down is what actually drops the entries.
+
 // Coarse IP-based guard for the SSO endpoints. Per-clientId throttling (above)
-// is the precise control; this is defense-in-depth against unauthenticated
-// spray traffic from a single origin. Mounted on the /auth/sso subtree below
-// so every SSO route — including credential-returning ones — is covered.
+// is the precise control; this adds a per-origin bound on unauthenticated spray
+// traffic. Mounted on the /auth/sso subtree below so every SSO route —
+// including credential-returning ones — is covered.
+//
+// Same caveat as the poll throttle: express-rate-limit's default MemoryStore is
+// in-process, so 60/min is PER WARM CONTAINER, not per deployment. N containers
+// give an IP N × 60/min. API Gateway throttling (template.yaml) is the only
+// global limit here.
 const ssoLimiter = rateLimit({
   windowMs: 60_000,
   limit: 60,
@@ -130,10 +157,12 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Apply rate limit + CSRF header gate to every /auth/sso route, so new
-// endpoints inherit the protections automatically instead of each one having
-// to remember.
-app.use('/auth/sso', ssoLimiter, requireRequestedByHeader);
+// Apply rate limit + CSRF header gate + input-format validation to every
+// /auth/sso route, so new endpoints inherit the protections automatically
+// instead of each one having to remember. Order matters: throttle first, then
+// the CSRF gate, then validation — so unauthorized traffic never reaches the
+// validator, and no route handler ever sees a malformed ssoRegion/startUrl.
+app.use('/auth/sso', ssoLimiter, requireRequestedByHeader, validateSsoInput);
 
 app.post('/auth/sso/start', async (req, res) => {
   try {

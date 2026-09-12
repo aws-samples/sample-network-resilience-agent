@@ -61,6 +61,15 @@ export interface SerializedTopologyData {
   connectionUtilization?: Tuple<string, { ingressBpsPeak?: number; egressBpsPeak?: number }>[];
   utilizationWindowDays?: 30 | 60 | 90;
   maintenanceEvents?: TopologyData['maintenanceEvents'];
+  /**
+   * Which resources failed or truncated when this snapshot was captured.
+   *
+   * Travels with the file on purpose. A snapshot is what gets attached to a
+   * report, and a reader who cannot see that the source topology was missing
+   * its VPC route tables will read the resiliency score as authoritative.
+   * Optional, so v1/v2 snapshots taken before this existed still import.
+   */
+  fetchIssues?: TopologyData['fetchIssues'];
   homeAccountId?: string;
   regionNames?: Tuple<string, string>[];
 }
@@ -157,6 +166,7 @@ export function serializeTopologyData(td: TopologyData): SerializedTopologyData 
     connectionUtilization: td.connectionUtilization ? [...td.connectionUtilization.entries()] : undefined,
     utilizationWindowDays: td.utilizationWindowDays,
     maintenanceEvents: td.maintenanceEvents,
+    fetchIssues: td.fetchIssues,
     homeAccountId: td.homeAccountId,
     regionNames: td.regionNames ? [...td.regionNames.entries()] : undefined,
   };
@@ -192,6 +202,7 @@ export function deserializeTopologyData(s: SerializedTopologyData): TopologyData
     connectionUtilization: s.connectionUtilization ? new Map(s.connectionUtilization) : undefined,
     utilizationWindowDays: s.utilizationWindowDays,
     maintenanceEvents: s.maintenanceEvents,
+    fetchIssues: s.fetchIssues,
     homeAccountId: s.homeAccountId,
     regionNames: s.regionNames ? new Map(s.regionNames) : undefined,
   };

@@ -76,6 +76,31 @@ Resources:
           - POST
           - OPTIONS
         MaxAge: 3600
+      # /auth/sso/connect returns temporary IAM credentials, so who called it,
+      # from where, and with what result must be recorded. Without this block
+      # source IP / route / status / latency are silently dropped. No IAM change
+      # is needed: HTTP APIs write access logs directly (unlike REST APIs, which
+      # need an account-level CloudWatch role).
+      AccessLogSettings:
+        DestinationArn: !GetAtt SsoApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","sourceIp":"$context.identity.sourceIp","requestTime":"$context.requestTime","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength","integrationErrorMessage":"$context.integrationErrorMessage"}'
+      # The real GLOBAL request ceiling. The per-clientId poll throttle and the
+      # express-rate-limit IP limit in src/app.ts are in-process, so under
+      # Lambda they bound each warm container independently — application-layer
+      # defence-in-depth, not a deployment-wide limit. This is the limit that
+      # actually caps aggregate traffic to the credential-issuing endpoints.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+
+  # Retained for 30 days, deliberately longer than the Lambda group's 7 below:
+  # access logs are the forensic primary record for a credential-issuing
+  # endpoint, and an incident is rarely noticed within a week.
+  SsoApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${AWS::StackName}-sso
+      RetentionInDays: 30
 
   SsoFunctionLogGroup:
     Type: AWS::Logs::LogGroup

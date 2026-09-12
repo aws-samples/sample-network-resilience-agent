@@ -13,7 +13,6 @@ import {
   ruleSingleConnectionPerLocation,
   ruleNoTgw,
   ruleSingleVgw,
-  ruleNoLag,
   ruleLagResiliency,
   type ResiliencyTarget,
 } from './resiliency-rules';
@@ -25,6 +24,11 @@ import {
 import {
   ruleVifDown,
   ruleConnectionNotAvailable,
+  ruleConsistentPrefixAdvertisement,
+  ruleBgpRouteLimit,
+  ruleBgpPrefixChurn,
+  ruleBgpSessionStability,
+  ruleDxFailoverTesting,
   ruleEnterpriseSupportRequired,
   ruleWellArchitectedReviewRequired,
   getAllBestPracticeResults,
@@ -58,6 +62,29 @@ function determineResiliencyLevel(topology: TopologyData): ResiliencyLevel {
  * feed a specific DX Gateway. Walking VIF→Connection→Location keeps the scope
  * tight so each DXGW is assessed on its own posture.
  */
+/**
+ * Best-practice rules stated per DX gateway rather than estate-wide.
+ *
+ * Includes the healthy-path `-ok` attestations, which are emitted by the same rule
+ * functions: leaving those global would put "BGP prefix count is well within the
+ * limit" in Estate-wide findings while the warning for the same rule sat on a card.
+ *
+ * Kept beside `buildDxgwScope` because that is what makes them safe — see the long
+ * note at the per-gateway call site for what may and may not join this list.
+ */
+const PER_DXGW_BEST_PRACTICE_RULE_IDS: ReadonlySet<string> = new Set([
+  'vif-down',
+  'connection-not-available',
+  'consistent-prefix-advertisement',
+  'bgp-route-limit',
+  'bgp-route-limit-ok',
+  'prefix-churn',
+  'bgp-session-stability',
+  'bgp-session-stability-ok',
+  'dx-failover-testing',
+  'dx-failover-testing-ok',
+]);
+
 function buildDxgwScope(topology: TopologyData, dxGatewayId: string): TopologyData {
   return buildDxgwGroupScope(topology, new Set([dxGatewayId]));
 }
@@ -233,8 +260,6 @@ function runPerDxgwRules(
 
     recs.push(...ruleSingleConnectionPerLocation(scope, target, dxGatewayId, carriesPublicVif, sinkDevicesScoped, groupDeviceRedundantLocations));
 
-    const noLag = ruleNoLag(scope);
-    if (noLag) recs.push(noLag);
   }
 
   const vifDown = ruleVifDown(scope);
@@ -242,6 +267,43 @@ function runPerDxgwRules(
 
   const connDown = ruleConnectionNotAvailable(scope);
   if (connDown.recommendation) recs.push(connDown.recommendation);
+
+  /**
+   * VIF-subject best-practice rules, graded against THIS gateway's VIFs.
+   *
+   * They used to run once estate-wide and name every affected VIF in one joined
+   * sentence, which put "hirohero-poc-summit-sg-02 is at 84% of its quota" in an
+   * Estate-wide findings list while the gateway that VIF belongs to sat two screens
+   * up with its own card. The finding names a resource; the resource has exactly one
+   * gateway; so the finding belongs on that gateway.
+   *
+   * Safe here only because `buildDxgwGroupScope` spreads the topology — `vifRoutes`,
+   * `bgpStability`, `vifFailoverTests` and `bgpPrefixMetrics` all survive intact and
+   * are keyed by VIF id, so each rule sees exactly this gateway's data.
+   *
+   * NOT moved, and each for a reason worth keeping written down:
+   *  - `shared-logical-device` is ABOUT a device shared across gateways; scoping it to
+   *    one gateway destroys the finding.
+   *  - `unused-dx-gateway` and `dxgw-propagation` read `dxGateways` /
+   *    `dxGatewayAssociations`, which the scope does NOT filter — they would report
+   *    every gateway's problem on every gateway's card.
+   *  - the two connection-subject rules (`prefix-pool-exhausted`,
+   *    `logical-redundancy`) grade a port that can carry VIFs for several gateways.
+   *  - VPN, blackhole-route, VPC and AWS-Health rules have no gateway subject at all.
+   *
+   * Anything added here must also be excluded from `globalBestPracticeRecs`, or it
+   * renders twice — once per gateway and once estate-wide.
+   */
+  for (const rule of [
+    ruleConsistentPrefixAdvertisement,
+    ruleBgpRouteLimit,
+    ruleBgpPrefixChurn,
+    ruleBgpSessionStability,
+    ruleDxFailoverTesting,
+  ]) {
+    const result = rule(scope);
+    if (result.recommendation) recs.push(result.recommendation);
+  }
 
   // SLA preconditions (tier-dependent, attestation-only since AWS APIs don't
   // expose support-plan or Well-Architected status).
@@ -282,8 +344,6 @@ function runPerVgwRules(
 
     recs.push(...ruleSingleConnectionPerLocation(scope, target, vgwId, false, sinkDevicesFull, undefined, 'vgw'));
 
-    const noLag = ruleNoLag(scope);
-    if (noLag) recs.push(noLag);
   }
 
   const vifDown = ruleVifDown(scope);
@@ -793,15 +853,15 @@ export function analyzeTopology(
     const singleLocation = ruleSingleDxLocation(topology, globalEffectiveTarget);
     if (singleLocation) globalResiliencyRecs.push(singleLocation);
     globalResiliencyRecs.push(...ruleSingleConnectionPerLocation(topology, globalEffectiveTarget));
-    const noLag = ruleNoLag(topology);
-    if (noLag) globalResiliencyRecs.push(noLag);
     globalResiliencyRecs.push(...ruleLagResiliency(topology, globalEffectiveTarget));
   }
 
   const bestPractice = getAllBestPracticeResults(topology);
-  // VIF-down and connection-not-available are now per-DXGW; strip them from the global list.
+  // Rules graded per DX gateway instead. Their global pass still RUNS — it is what
+  // produces the canvas node annotations — but its recommendation is dropped here so
+  // the finding is stated once, on the gateway whose VIF it names.
   const globalBestPracticeRecs = bestPractice.recommendations.filter(
-    (r) => r.ruleId !== 'vif-down' && r.ruleId !== 'connection-not-available',
+    (r) => !PER_DXGW_BEST_PRACTICE_RULE_IDS.has(r.ruleId),
   );
 
   // --- Aggregated views (back-compat for callers reading the old shape) ---

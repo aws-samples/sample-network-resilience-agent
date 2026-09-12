@@ -97,6 +97,23 @@ describe('fetchVifRoutes', () => {
     expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
+  it('drops a route whose echoed direction is not the one asked for', async () => {
+    // The accepted list is the numerator of every prefix-quota percentage, so an
+    // advertised route leaking into it inflates that count with no visible
+    // symptom — it just reads as three more prefixes on the wire. Relabelling by
+    // the requested filter (the old behaviour) hid exactly that.
+    respondByDirection({
+      accepted: [
+        { cidr: '10.0.0.0/24', routeDirection: 'accepted' },
+        { cidr: '172.31.0.0/16', routeDirection: 'advertised' },
+        { cidr: '10.0.1.0/24' },
+      ],
+    });
+    const out = await fetchVifRoutes(creds, [makeVif()]);
+    // The unlabelled route still counts — absence is not a contradiction.
+    expect(out.get('dxvif-1')!.accepted.map((r) => r.cidr)).toEqual(['10.0.0.0/24', '10.0.1.0/24']);
+  });
+
   it('follows pagination until nextToken is exhausted', async () => {
     let call = 0;
     sendMock.mockImplementation((cmd: { input: { filters?: { routeDirection?: string } } }) => {

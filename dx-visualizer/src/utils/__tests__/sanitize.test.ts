@@ -40,6 +40,7 @@ function makeFixture(): TopologyData {
         ],
         region: 'us-east-1',
         ownerAccount: '111122223333',
+        awsLogicalDeviceId: 'aws-device-x1y2z3',
         // A public VIF's advertised prefixes — the customer's real routable
         // blocks. Deliberately NOT documentation-reserved ranges, or
         // SPECIAL_CIDRS would pass them through and the leak scan below would
@@ -192,6 +193,11 @@ function makeFixture(): TopologyData {
             communities: ['65000:100'],
             routeDirection: 'accepted' as const,
             routeInstalledAt: '2026-08-01T09:15:00.000Z',
+            // Same real device as the parent VIF above. Masking it on the VIF
+            // but not here would put the real value and its own pseudonym in
+            // one export, re-identifying the pseudonym everywhere else it
+            // appears — so this pairing is what the leak scan hinges on.
+            awsLogicalDeviceId: 'aws-device-x1y2z3',
           },
           {
             // Default route must survive verbatim or route semantics break.
@@ -208,6 +214,10 @@ function makeFixture(): TopologyData {
           asPath: [{ pathType: 'seq' as const, path: [64512] }],
           communities: ['7224:8100'],
           routeDirection: 'advertised' as const,
+          // A second, different real device: one VIF's routes can sit on either
+          // of a location's redundant devices, so distinct values must get
+          // distinct pseudonyms rather than collapsing into one.
+          awsLogicalDeviceId: 'aws-device-q7r8s9',
         }],
       }],
     ]),
@@ -226,6 +236,23 @@ function makeFixture(): TopologyData {
         endTime: '2026-06-27T02:30:00.000Z',
       }]],
     ]),
+    // Real AWS error text, because that is the shape that leaks: an
+    // AccessDenied names the caller's ARN, and the spoke-account label carries
+    // an account ID. Both must be masked or a "sanitized" export publishes them
+    // in a field that merely looks like prose.
+    fetchIssues: [
+      {
+        label: '444455556666/ap-southeast-1/VpcRouteTables',
+        kind: 'failed' as const,
+        message:
+          'User: arn:aws:iam::444455556666:user/network-auditor is not authorized to perform: ec2:DescribeRouteTables',
+      },
+      {
+        label: 'Health: issues',
+        kind: 'truncated' as const,
+        message: 'stopped after 25 pages; older entries are not shown',
+      },
+    ],
     homeAccountId: '111122223333',
     regionNames: new Map([['us-east-1', 'US East (N. Virginia)']]),
   };
@@ -261,6 +288,10 @@ const REAL_VALUES_TO_PURGE = [
   'EqDC2',
   'EqDC2-3jw9w7c4l',
   'aws-device-x1y2z3',
+  // On BGP routes as well as on the connection/VIF — vifRoute() spread the route
+  // through without masking it, so this value shipped raw in a "sanitized"
+  // export while the same value appeared masked on its parent VIF.
+  'aws-device-q7r8s9',
   // CIDRs and IPs
   '10.0.0.0/16',
   '169.254.1.1/30',
@@ -275,6 +306,10 @@ const REAL_VALUES_TO_PURGE = [
   '0hm9q4ki',
   // ASN
   '4200001001',
+  // Account ID and IAM user name embedded in an AWS error message, plus the
+  // spoke account ID in the issue label
+  '444455556666',
+  'network-auditor',
   '4200001100',
   '4200000123',
 ];
@@ -385,6 +420,26 @@ describe('sanitize', () => {
     expect(specific.communities[0]).toMatch(/^\d+:100$/);
 
     expect(routes.advertised[0].cidr).not.toBe('172.31.0.0/16');
+  });
+
+  it('maps a route\'s awsLogicalDeviceId to the same pseudo as its parent VIF', () => {
+    // vifRoute() spread `...r` and named every other field, so this one survived
+    // verbatim while connection() and virtualInterface() masked the identical
+    // field. That is worse than a plain leak: the real value and its own
+    // pseudonym sit in one export, so the pseudonym is re-identified for every
+    // object that shares the device.
+    const out = sanitizeTopology(makeFixture());
+    const routes = out.vifRoutes!.get([...out.vifRoutes!.keys()][0])!;
+    const vifDevice = out.virtualInterfaces[0].awsLogicalDeviceId;
+
+    expect(vifDevice).not.toBe('aws-device-x1y2z3');
+    // Same real device as the VIF => same pseudonym, so the VIF↔device
+    // relationship an SA reads off the snapshot still holds.
+    const sameDevice = routes.accepted.find((r) => r.awsLogicalDeviceId != null)!;
+    expect(sameDevice.awsLogicalDeviceId).toBe(vifDevice);
+    // A different real device => a different pseudonym, not a collapse into one.
+    expect(routes.advertised[0].awsLogicalDeviceId).not.toBe('aws-device-q7r8s9');
+    expect(routes.advertised[0].awsLogicalDeviceId).not.toBe(vifDevice);
   });
 
   it('leaves the default route intact so route semantics survive', () => {

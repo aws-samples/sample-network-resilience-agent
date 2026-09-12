@@ -16,13 +16,13 @@ const MASKERS: { re: RegExp; replace: (m: string) => string }[] = [
     replace: () => `${repeat(8)}-${repeat(4)}-${repeat(4)}-${repeat(4)}-${repeat(12)}`,
   },
 
-  // Prefixed AWS resource IDs. Handles dxcon-, dxvif-, dxgw-, vgw-, vpc-,
-  // tgw- (plus tgw-attach-/tgw-rtb-/tgw-connect-), vpn-, cgw-, subnet-,
+  // Prefixed AWS resource IDs. Handles dxcon-, dxvif-, dxgw-, dxlag-, vgw-,
+  // vpc-, tgw- (plus tgw-attach-/tgw-rtb-/tgw-connect-), vpn-, cgw-, subnet-,
   // eni-, nat-, igw-, eigw-, pcx-, rtb-, core-network-, cnpx-. Run before
   // the account-ID masker so a hex suffix like "vpc-123456789012" doesn't
   // get half-masked.
   {
-    re: /\b(dx(?:con|vif|gw)|vgw|vpc|tgw(?:-(?:attach|rtb|connect))?|vpn|cgw|subnet|eni|nat|igw|eigw|pcx|rtb|core-network|cnpx)-[0-9a-f]+\b/gi,
+    re: /\b(dx(?:con|vif|gw|lag)|vgw|vpc|tgw(?:-(?:attach|rtb|connect))?|vpn|cgw|subnet|eni|nat|igw|eigw|pcx|rtb|core-network|cnpx)-[0-9a-f]+\b/gi,
     replace: (m) => {
       const i = m.lastIndexOf('-');
       return `${m.slice(0, i + 1)}${repeat(8)}`;

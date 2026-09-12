@@ -15,6 +15,15 @@ import {
   DescribeRegionsCommand,
 } from '@aws-sdk/client-ec2';
 import type { Vpc, VpnGateway, VpnConnection, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpcPeeringConnection, CustomerGateway, TgwRouteTable, TgwRoute, TgwRouteTableWithRoutes, TgwRouteTablePropagation, VpcRouteTable, VpcRoute } from '../types/aws-resources';
+import { drainPages } from './paginate';
+
+/**
+ * Page cap for the EC2 describe paginators. DescribeRouteTables returns up to
+ * 100 route tables per page, so 1000 pages allows ~100k route tables in one
+ * region — far beyond any real account (the default service quota is 200 per
+ * VPC) while still bounding an endpoint that never clears NextToken.
+ */
+const EC2_MAX_PAGES = 1000;
 
 function tagsToRecord(tags: { Key?: string; Value?: string }[] | undefined): Record<string, string> {
   const result: Record<string, string> = {};
@@ -247,69 +256,69 @@ export async function fetchTgwRouteTablePropagations(
   client: EC2Client,
   routeTableId: string,
 ): Promise<TgwRouteTablePropagation[]> {
-  const out: TgwRouteTablePropagation[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new GetTransitGatewayRouteTablePropagationsCommand({
-      TransitGatewayRouteTableId: routeTableId,
-      NextToken: nextToken,
-    }));
-    for (const p of res.TransitGatewayRouteTablePropagations ?? []) {
-      out.push({
+  return drainPages<TgwRouteTablePropagation>(
+    `TGW route table propagations for ${routeTableId}`,
+    async (nextToken) => {
+      const res = await client.send(new GetTransitGatewayRouteTablePropagationsCommand({
+        TransitGatewayRouteTableId: routeTableId,
+        NextToken: nextToken,
+      }));
+      const items = (res.TransitGatewayRouteTablePropagations ?? []).map((p) => ({
         transitGatewayAttachmentId: p.TransitGatewayAttachmentId ?? '',
         resourceId: p.ResourceId ?? '',
         resourceType: p.ResourceType ?? '',
         // Enum is disabled | disabling | enabled | enabling.
         state: p.State ?? '',
-      });
-    }
-    nextToken = res.NextToken;
-  } while (nextToken);
-  return out;
+      }));
+      return { items, nextToken: res.NextToken };
+    },
+    { maxPages: EC2_MAX_PAGES },
+  );
 }
 
 export async function fetchVpcRouteTables(client: EC2Client): Promise<VpcRouteTable[]> {
   // DescribeRouteTables returns every route table in the account+region in a
   // single call (paginated). One trip handles all VPCs we care about.
-  const result: VpcRouteTable[] = [];
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new DescribeRouteTablesCommand({ NextToken: nextToken }));
-    for (const rt of res.RouteTables ?? []) {
-      const associations = rt.Associations ?? [];
-      const isMain = associations.some((a) => a.Main === true);
-      const associatedSubnetIds = associations
-        .map((a) => a.SubnetId)
-        .filter((s): s is string => Boolean(s));
-      const routes: VpcRoute[] = (rt.Routes ?? []).map((r) => ({
-        destinationCidrBlock: r.DestinationCidrBlock,
-        destinationIpv6CidrBlock: r.DestinationIpv6CidrBlock,
-        destinationPrefixListId: r.DestinationPrefixListId,
-        gatewayId: r.GatewayId,
-        natGatewayId: r.NatGatewayId,
-        transitGatewayId: r.TransitGatewayId,
-        vpcPeeringConnectionId: r.VpcPeeringConnectionId,
-        networkInterfaceId: r.NetworkInterfaceId,
-        egressOnlyInternetGatewayId: r.EgressOnlyInternetGatewayId,
-        carrierGatewayId: r.CarrierGatewayId,
-        localGatewayId: r.LocalGatewayId,
-        coreNetworkArn: r.CoreNetworkArn,
-        instanceId: r.InstanceId,
-        origin: r.Origin,
-        state: (r.State === 'blackhole' ? 'blackhole' : 'active') as 'active' | 'blackhole',
-      }));
-      result.push({
-        routeTableId: rt.RouteTableId ?? '',
-        vpcId: rt.VpcId ?? '',
-        isMain,
-        associatedSubnetIds,
-        tags: tagsToRecord(rt.Tags),
-        routes,
+  return drainPages<VpcRouteTable>(
+    'VPC route tables',
+    async (nextToken) => {
+      const res = await client.send(new DescribeRouteTablesCommand({ NextToken: nextToken }));
+      const items = (res.RouteTables ?? []).map((rt) => {
+        const associations = rt.Associations ?? [];
+        const isMain = associations.some((a) => a.Main === true);
+        const associatedSubnetIds = associations
+          .map((a) => a.SubnetId)
+          .filter((s): s is string => Boolean(s));
+        const routes: VpcRoute[] = (rt.Routes ?? []).map((r) => ({
+          destinationCidrBlock: r.DestinationCidrBlock,
+          destinationIpv6CidrBlock: r.DestinationIpv6CidrBlock,
+          destinationPrefixListId: r.DestinationPrefixListId,
+          gatewayId: r.GatewayId,
+          natGatewayId: r.NatGatewayId,
+          transitGatewayId: r.TransitGatewayId,
+          vpcPeeringConnectionId: r.VpcPeeringConnectionId,
+          networkInterfaceId: r.NetworkInterfaceId,
+          egressOnlyInternetGatewayId: r.EgressOnlyInternetGatewayId,
+          carrierGatewayId: r.CarrierGatewayId,
+          localGatewayId: r.LocalGatewayId,
+          coreNetworkArn: r.CoreNetworkArn,
+          instanceId: r.InstanceId,
+          origin: r.Origin,
+          state: (r.State === 'blackhole' ? 'blackhole' : 'active') as 'active' | 'blackhole',
+        }));
+        return {
+          routeTableId: rt.RouteTableId ?? '',
+          vpcId: rt.VpcId ?? '',
+          isMain,
+          associatedSubnetIds,
+          tags: tagsToRecord(rt.Tags),
+          routes,
+        };
       });
-    }
-    nextToken = res.NextToken;
-  } while (nextToken);
-  return result;
+      return { items, nextToken: res.NextToken };
+    },
+    { maxPages: EC2_MAX_PAGES },
+  );
 }
 
 /**
