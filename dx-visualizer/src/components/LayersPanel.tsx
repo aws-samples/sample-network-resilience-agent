@@ -2,15 +2,15 @@ import { useState } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import { useIsLight } from '../hooks/useTheme';
 import { COLORS } from '../utils/colors';
+import { ViewOptionsBadge, ViewOptionsSection } from './ViewOptionsPanel';
 
 /**
  * Canvas-side visibility control for whole connectivity layers.
  *
  * It lives on the canvas rather than in the TopBar because what it changes is
  * the canvas: the TopBar carries account/session chrome and overlays that paint
- * *onto* the graph, while this removes a slice of the graph itself. Stacking it
- * under the Legend also puts "what the shapes mean" and "which shapes are on
- * screen" in one corner.
+ * *onto* the graph, while this removes a slice of the graph itself. It is the
+ * first section in View options, followed by AWS tags and the Legend.
  *
  * Only Site-to-Site VPN is toggleable today, so the panel renders **only when
  * the account actually has a VPN**. A layer control for something absent from
@@ -41,72 +41,33 @@ export function LayersPanel() {
   const hiddenCount = showVpn ? 0 : 1;
 
   return (
-    <div
-      className={`rounded-lg text-[10px] font-tech ${
-        light
-          ? 'bg-gray-100/90 border border-gray-300 text-gray-600 shadow-sm'
-          : 'bg-slate-800/90 border border-slate-600 text-slate-300 shadow-lg'
-      }`}
+    <ViewOptionsSection
+      title="Layers"
+      toggleLabel="Toggle layers"
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+      badge={hiddenCount > 0 ? <ViewOptionsBadge>⚠ {hiddenCount} hidden</ViewOptionsBadge> : undefined}
     >
       <button
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        aria-label="Toggle layers"
-        className={`flex items-center gap-1.5 w-full px-3 py-1.5 cursor-pointer ${
-          light ? 'hover:bg-gray-50' : 'hover:bg-slate-700/50'
-        } ${expanded ? 'rounded-t-lg' : 'rounded-lg'}`}
+        type="button"
+        onClick={() => setShowVpn(!showVpn)}
+        aria-pressed={showVpn}
+        className={`flex w-full items-center gap-2 rounded px-1 py-1 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${
+          light ? 'hover:bg-white' : 'hover:bg-white/5'
+        } ${showVpn ? '' : light ? 'text-amber-700' : 'text-amber-300'}`}
+        title={
+          showVpn
+            ? `Hide Site-to-Site VPN (${vpnCount}) from the canvas — resiliency findings are unaffected`
+            : `${vpnCount} Site-to-Site VPN ${vpnCount === 1 ? 'connection is' : 'connections are'} hidden from the canvas. Resiliency findings still include them.`
+        }
       >
-        <span className="font-semibold">Layers</span>
-        {hiddenCount > 0 && (
-          <span
-            className={`ml-1 rounded px-1 py-[1px] font-semibold ${
-              light ? 'bg-amber-100 text-amber-700' : 'bg-amber-500/15 text-amber-300'
-            }`}
-          >
-            ⚠ {hiddenCount} hidden
-          </span>
-        )}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 20 20"
-          fill="currentColor"
-          className={`w-3 h-3 ml-auto transition-transform ${expanded ? '' : '-rotate-90'}`}
-        >
-          <path
-            fillRule="evenodd"
-            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-            clipRule="evenodd"
-          />
-        </svg>
+        <LayerDot on={showVpn} />
+        <span className={showVpn ? '' : 'line-through decoration-1'}>Site-to-Site VPN</span>
+        <span className={`ml-auto tabular-nums ${light ? 'text-gray-400' : 'text-slate-500'}`}>
+          {vpnCount}
+        </span>
       </button>
-      {expanded && (
-        <div
-          className={`flex flex-col gap-1 px-2 pb-2 pt-1 ${
-            light ? 'border-t border-gray-100' : 'border-t border-slate-700'
-          }`}
-          style={{ minWidth: 168 }}
-        >
-          <button
-            onClick={() => setShowVpn(!showVpn)}
-            aria-pressed={showVpn}
-            className={`flex items-center gap-2 px-1 py-[3px] rounded text-left ${
-              light ? 'hover:bg-white' : 'hover:bg-white/5'
-            } ${showVpn ? '' : light ? 'text-amber-700' : 'text-amber-300'}`}
-            title={
-              showVpn
-                ? `Hide Site-to-Site VPN (${vpnCount}) from the canvas — resiliency findings are unaffected`
-                : `${vpnCount} Site-to-Site VPN ${vpnCount === 1 ? 'connection is' : 'connections are'} hidden from the canvas. Resiliency findings still include them.`
-            }
-          >
-            <LayerDot on={showVpn} />
-            <span className={showVpn ? '' : 'line-through decoration-1'}>Site-to-Site VPN</span>
-            <span className={`ml-auto tabular-nums ${light ? 'text-gray-400' : 'text-slate-500'}`}>
-              {vpnCount}
-            </span>
-          </button>
-        </div>
-      )}
-    </div>
+    </ViewOptionsSection>
   );
 }
 

@@ -2,14 +2,28 @@ export const COLORS = {
   existing: {
     border: '#8B5CF6',
     bg: '#F5F3FF',
+    darkBg: '#1e1b4b',
     text: '#1F2937',
     edge: '#8B5CF6',
   },
   recommended: {
     border: '#10B981',
     bg: '#ECFDF5',
+    darkBg: '#022c22',
     text: '#065F46',
     edge: '#10B981',
+  },
+  crossAccount: {
+    border: '#F59E0B',
+    lightBorder: '#d97706',
+    bg: '#FFFBEB',
+    darkBg: '#451a03',
+  },
+  inferredConnection: {
+    border: '#FACC15',
+    lightBorder: '#a16207',
+    bg: '#FEFCE8',
+    darkBg: '#422006',
   },
   containers: {
     dxLocation: { border: '#8B5CF6', bg: 'rgba(139,92,246,0.08)' },

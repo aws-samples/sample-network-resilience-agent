@@ -304,11 +304,7 @@ export class Sanitizer {
   }
 
   tags(real: Record<string, string>): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(real)) {
-      out[k] = this.tagValue(v);
-    }
-    return out;
+    return Object.fromEntries(Object.entries(real).map(([key, value]) => [key, this.tagValue(value)]));
   }
 
   // Location codes (e.g. "EqDC2") leak the colocation facility identity. Pseudo
@@ -384,6 +380,7 @@ export class Sanitizer {
       ...c,
       connectionId: this.resourceId(c.connectionId),
       connectionName: this.name('Connection', c.connectionName) ?? c.connectionName,
+      tags: c.tags ? this.tags(c.tags) : undefined,
       location: this.locationCode(c.location),
       lagId: c.lagId ? this.resourceId(c.lagId) : c.lagId,
       // partnerName is a public AWS partner string ("Equinix", "Megaport") —
@@ -408,6 +405,7 @@ export class Sanitizer {
       ...v,
       virtualInterfaceId: this.resourceId(v.virtualInterfaceId),
       virtualInterfaceName: this.name('VIF', v.virtualInterfaceName) ?? v.virtualInterfaceName,
+      tags: v.tags ? this.tags(v.tags) : undefined,
       connectionId: this.resourceId(v.connectionId),
       directConnectGatewayId: v.directConnectGatewayId ? this.uuid(v.directConnectGatewayId) : v.directConnectGatewayId,
       virtualGatewayId: v.virtualGatewayId ? this.resourceId(v.virtualGatewayId) : v.virtualGatewayId,
@@ -432,6 +430,7 @@ export class Sanitizer {
     return {
       ...g,
       directConnectGatewayId: this.uuid(g.directConnectGatewayId),
+      tags: g.tags ? this.tags(g.tags) : undefined,
       directConnectGatewayName: this.name('DXGW', g.directConnectGatewayName) ?? g.directConnectGatewayName,
       amazonSideAsn: this.asn(g.amazonSideAsn) ?? g.amazonSideAsn,
     };
@@ -471,6 +470,7 @@ export class Sanitizer {
       ...l,
       lagId: this.resourceId(l.lagId),
       lagName: this.name('LAG', l.lagName) ?? l.lagName,
+      tags: l.tags ? this.tags(l.tags) : undefined,
       location: this.locationCode(l.location),
       connections: l.connections.map((c) => this.connection(c)),
     };
@@ -518,6 +518,7 @@ export class Sanitizer {
         : this.resourceId(a.resourceId),
       resourceOwnerId: this.accountId(a.resourceOwnerId),
       name: a.name ? this.name('TGWAttach', a.name) : a.name,
+      tags: a.tags ? this.tags(a.tags) : undefined,
     };
   }
 
@@ -598,6 +599,7 @@ export class Sanitizer {
       coreNetworkArn: this.arn(n.coreNetworkArn) ?? n.coreNetworkArn,
       globalNetworkId: this.resourceId(n.globalNetworkId),
       description: this.description(n.description) ?? n.description,
+      tags: n.tags ? this.tags(n.tags) : undefined,
       edges: n.edges.map((e) => ({
         ...e,
         // edgeLocation is the AWS region code ("us-east-1") — public.

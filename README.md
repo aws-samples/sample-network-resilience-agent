@@ -279,6 +279,7 @@ All visual and interactive capabilities are documented in full in **[VISUALIZATI
 
 - **Canvas & layout** — [network components](dx-visualizer/docs/VISUALIZATION.md#1-network-components-visualized), [route table panels](dx-visualizer/docs/VISUALIZATION.md#17-route-table-panels), [VPC / TGW collapsing](dx-visualizer/docs/VISUALIZATION.md#14-vpc-collapsing), [unattached resources zone](dx-visualizer/docs/VISUALIZATION.md#16-unattached-resources-zone), [layout engine](dx-visualizer/docs/VISUALIZATION.md#18-layout-engine)
 - **View & focus** — [view modes](dx-visualizer/docs/VISUALIZATION.md#2-view-modes), [per-DX-gateway recommendation focus](dx-visualizer/docs/VISUALIZATION.md#3-per-dx-gateway-recommendation-focus)
+- **AWS tag filters** — select tag keys and values below Layers to show matching resources and their network paths; [combine filters, clear them, or share the selection in a snapshot](dx-visualizer/docs/VISUALIZATION.md#10-aws-tag-filters)
 - **Editing** — [topology editing](dx-visualizer/docs/VISUALIZATION.md#4-topology-editing), [edge label dragging](dx-visualizer/docs/VISUALIZATION.md#5-edge-label-dragging), [canvas lock](dx-visualizer/docs/VISUALIZATION.md#7-canvas-lock)
 - **Operational overlays** — [live status layer](dx-visualizer/docs/VISUALIZATION.md#6-live-status-layer), [failure simulation](dx-visualizer/docs/VISUALIZATION.md#8-failure-simulation)
 - **Presentation** — [dark / light theme](dx-visualizer/docs/VISUALIZATION.md#9-dark--light-theme)

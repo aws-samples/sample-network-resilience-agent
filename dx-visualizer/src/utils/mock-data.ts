@@ -345,14 +345,14 @@ export const noResiliencyTopology: TopologyData = {
     {
       vpcId: 'vpc-001',
       cidrBlock: '10.0.0.0/16',
-      tags: { Name: 'Production-VPC' },
+      tags: { Name: 'Production-VPC', Environment: 'production', Application: 'payments' },
       region: 'ap-southeast-1',
       state: 'available',
     },
     {
       vpcId: 'vpc-002',
       cidrBlock: '10.1.0.0/16',
-      tags: { Name: 'Staging-VPC' },
+      tags: { Name: 'Staging-VPC', Environment: 'staging', Application: 'payments' },
       region: 'ap-southeast-1',
       state: 'available',
     },
@@ -688,8 +688,8 @@ export const devTestTopology: TopologyData = {
   ],
   lags: [],
   vpcs: [
-    { vpcId: 'vpc-dt01', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC' }, region: 'ap-southeast-1', state: 'available' },
-    { vpcId: 'vpc-dt02', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-dt01', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC', Environment: 'production', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-dt02', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC', Environment: 'staging', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
   ],
   vpnGateways: [
     {
@@ -1201,9 +1201,9 @@ export const highResiliencyTopology: TopologyData = {
     },
   ],
   vpcs: [
-    { vpcId: 'vpc-high01', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC' }, region: 'ap-southeast-1', state: 'available' },
-    { vpcId: 'vpc-high02', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC' }, region: 'ap-southeast-1', state: 'available' },
-    { vpcId: 'vpc-high03', cidrBlock: '10.2.0.0/16', tags: { Name: 'Dev-VPC' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-high01', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC', Environment: 'production', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-high02', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC', Environment: 'staging', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-high03', cidrBlock: '10.2.0.0/16', tags: { Name: 'Dev-VPC', Environment: 'development', Application: 'sandbox' }, region: 'ap-southeast-1', state: 'available' },
   ],
   vpnGateways: [],
   vpnConnections: [
@@ -1623,9 +1623,9 @@ export const maximumResiliencyTopology: TopologyData = {
   ],
   lags: [],
   vpcs: [
-    { vpcId: 'vpc-001', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC' }, region: 'ap-southeast-1', state: 'available' },
-    { vpcId: 'vpc-002', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC' }, region: 'ap-southeast-1', state: 'available' },
-    { vpcId: 'vpc-003', cidrBlock: '10.2.0.0/16', tags: { Name: 'Dev-VPC' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-001', cidrBlock: '10.0.0.0/16', tags: { Name: 'Production-VPC', Environment: 'production', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-002', cidrBlock: '10.1.0.0/16', tags: { Name: 'Staging-VPC', Environment: 'staging', Application: 'payments' }, region: 'ap-southeast-1', state: 'available' },
+    { vpcId: 'vpc-003', cidrBlock: '10.2.0.0/16', tags: { Name: 'Dev-VPC', Environment: 'development', Application: 'sandbox' }, region: 'ap-southeast-1', state: 'available' },
     { vpcId: 'vpc-004', cidrBlock: '10.3.0.0/16', tags: { Name: 'Shared-Services-VPC' }, region: 'ap-southeast-1', state: 'available' },
     { vpcId: 'vpc-005', cidrBlock: '10.4.0.0/16', tags: { Name: 'Data-VPC' }, region: 'ap-southeast-1', state: 'available' },
     { vpcId: 'vpc-006', cidrBlock: '10.5.0.0/16', tags: { Name: 'Analytics-VPC' }, region: 'ap-southeast-1', state: 'available' },

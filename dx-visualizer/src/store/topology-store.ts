@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { DxNode, DxEdge, TopologyData, ViewMode } from '../types/topology';
+import type { DxNode, DxEdge, TopologyData, TopologyTagFilter, ViewMode } from '../types/topology';
 import type { CombinedAssessment } from '../types/recommendations';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
 import type { AwsCredentials, VifRoutes, VifFailoverTest } from '../types/aws-resources';
@@ -152,6 +152,25 @@ interface TopologyStore {
   // "No Site-to-Site VPN Backup" warning for an account that has one.
   showVpn: boolean;
   setShowVpn: (show: boolean) => void;
+
+  // Canvas-only scope. The full topology remains available to assessments,
+  // route panels, chat and snapshot exports.
+  tagFilters: TopologyTagFilter[];
+  setTagFilters: (filters: TopologyTagFilter[]) => void;
+  // The resources that carry the filter's tags themselves, as opposed to the
+  // path context the filter keeps around them. `tagMatchIds` holds AWS
+  // resource ids (VIF / connection edges and collapsed-group rows look these
+  // up); `tagMatchNodeIds` holds the canvas node ids whose `resourceId` is in
+  // it (card markers, fit-to-matches). Both are rebuilt with the graph and
+  // only meaningful while `tagFilters` is non-empty — readers gate on that, so
+  // a stale set after a reset never shows.
+  tagMatchIds: Set<string>;
+  tagMatchNodeIds: Set<string>;
+  setTagMatches: (ids: Set<string>, nodeIds: Set<string>) => void;
+  // Bumped by "N matching resources" in the tag panel; FlowCanvas fits the
+  // view to the matches whenever it changes.
+  tagFitRequest: number;
+  requestTagFit: () => void;
 
   // Unattached resources zone (orphan VPCs + isolated TGWs) lives inside
   // AWS Cloud and is collapsed by default so the canvas loads focused on
@@ -739,7 +758,10 @@ function computeRouteDiffPath(
 
 export const useTopologyStore = create<TopologyStore>((set, get) => ({
   credentials: null,
-  setCredentials: (creds) => set({ credentials: creds, useMock: !creds, homeAccountName: null }),
+  setCredentials: (creds) => set((state) => ({
+    credentials: creds, useMock: !creds, homeAccountName: null,
+    tagFilters: state.importedSnapshot ? state.tagFilters : [],
+  })),
 
   topologyData: null,
   setTopologyData: (data) => set({ topologyData: data }),
@@ -760,6 +782,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
     get().resetVifRoutes();
     set({
       topologyData: null,
+      tagFilters: [],
       currentNodes: [],
       currentEdges: [],
       recommendedNodes: [],
@@ -945,6 +968,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       try { localStorage.removeItem(HIDDEN_ONPREMISES_KEY); } catch { /* ignore */ }
       return {
         mockScenario: scenario,
+        tagFilters: [],
         userEdges: [],
         hiddenEdgeIds: new Set(),
         edgeReconnectOverrides: new Map(),
@@ -1096,6 +1120,20 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
 
   showVpn: true,
   setShowVpn: (show) => set({ showVpn: show }),
+
+  tagMatchIds: new Set(),
+  tagMatchNodeIds: new Set(),
+  setTagMatches: (ids, nodeIds) => set({ tagMatchIds: ids, tagMatchNodeIds: nodeIds }),
+  tagFitRequest: 0,
+  requestTagFit: () => set((state) => ({ tagFitRequest: state.tagFitRequest + 1 })),
+  tagFilters: [],
+  setTagFilters: (filters) => set({
+    tagFilters: [...new Map(filters.filter((f) => f.key !== '').map((f) => [f.key, { ...f }])).values()],
+    hoveredNodeId: null,
+    pinnedNodeId: null,
+    highlightedNodeIds: new Set(),
+    highlightedEdgeIds: new Set(),
+  }),
 
   expandedUnattachedZone: false,
   toggleUnattachedZone: () => set((state) => ({ expandedUnattachedZone: !state.expandedUnattachedZone })),
@@ -2068,6 +2106,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       // Absent in snapshots written before the VPN filter existed — those were
       // all exported with VPN visible, so default to showing it.
       showVpn: view.showVpn ?? true,
+      tagFilters: view.tagFilters?.map((f) => ({ ...f })) ?? [],
       showNonDxVpcs: new Set(view.showNonDxVpcs ?? []),
       expandedUnattachedZone: view.expandedUnattachedZone,
       expandedHiddenAssocZone: view.expandedHiddenAssocZone,
@@ -2114,6 +2153,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   clearImportedSnapshot: () => {
     set({
       importedSnapshot: null,
+      tagFilters: [],
       topologyData: null,
       currentNodes: [],
       currentEdges: [],

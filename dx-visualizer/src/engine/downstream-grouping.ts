@@ -44,44 +44,13 @@ export function groupDxGatewaysBySharedDownstream(topology: TopologyData): Map<s
 
   // Map each downstream target id → the DXGWs associated to it, then union them.
   const dxgwsByTarget = new Map<string, string[]>();
-  const addTarget = (targetId: string, dxgwId: string) => {
-    if (!targetId || !parent.has(dxgwId)) return;
-    const list = dxgwsByTarget.get(targetId);
-    if (list) list.push(dxgwId);
-    else dxgwsByTarget.set(targetId, [dxgwId]);
-  };
-
-  // Terminal VPCs reachable through a TGW / VGW — the VPC holds the real
-  // workload, so two DXGWs whose DIFFERENT intermediate gateways both reach the
-  // SAME VPC converge on one blast-radius and must group together, even though
-  // their direct association targets differ.
-  const vpcsByTgw = new Map<string, string[]>();
-  for (const att of topology.transitGatewayAttachments) {
-    if (att.resourceType === 'vpc' && att.resourceId) {
-      const list = vpcsByTgw.get(att.transitGatewayId);
-      if (list) list.push(att.resourceId);
-      else vpcsByTgw.set(att.transitGatewayId, [att.resourceId]);
+  for (const [dxgwId, targets] of downstreamTargetsByDxgw(topology)) {
+    if (!parent.has(dxgwId)) continue;
+    for (const targetId of targets) {
+      const list = dxgwsByTarget.get(targetId);
+      if (list) list.push(dxgwId);
+      else dxgwsByTarget.set(targetId, [dxgwId]);
     }
-  }
-  const vpcsByVgw = new Map<string, string[]>();
-  for (const vgw of topology.vpnGateways) {
-    const vpcs = (vgw.vpcAttachments ?? []).map((a) => a.vpcId).filter(Boolean);
-    if (vpcs.length) vpcsByVgw.set(vgw.vpnGatewayId, vpcs);
-  }
-
-  for (const assoc of topology.dxGatewayAssociations) {
-    const dxgwId = assoc.directConnectGatewayId;
-    const gwTargetId = assoc.associatedGateway?.id;
-    if (gwTargetId) {
-      addTarget(gwTargetId, dxgwId);
-      // Fold in the terminal VPCs this intermediate gateway reaches, keyed
-      // distinctly (`vpc:<id>`) so a shared VPC unions regardless of which
-      // TGW/VGW each DXGW went through.
-      const vpcs = vpcsByTgw.get(gwTargetId) ?? vpcsByVgw.get(gwTargetId) ?? [];
-      for (const vpcId of vpcs) addTarget(`vpc:${vpcId}`, dxgwId);
-    }
-    const coreId = assoc.associatedCoreNetwork?.id;
-    if (coreId) addTarget(coreId, dxgwId);
   }
 
   for (const dxgwIds of dxgwsByTarget.values()) {
@@ -105,6 +74,94 @@ export function groupDxGatewaysBySharedDownstream(topology: TopologyData): Map<s
     result.set(gw.directConnectGatewayId, byRoot.get(find(gw.directConnectGatewayId))!);
   }
   return result;
+}
+
+/**
+ * Every downstream a DXGW reaches, as grouping keys: the associated TGW / VGW /
+ * Cloud WAN core network id, plus `vpc:<id>` for each terminal VPC behind a
+ * TGW or VGW. Two gateways sharing any key share a blast-radius.
+ */
+function downstreamTargetsByDxgw(topology: TopologyData): Map<string, Set<string>> {
+  // Terminal VPCs reachable through a TGW / VGW — the VPC holds the real
+  // workload, so two DXGWs whose DIFFERENT intermediate gateways both reach the
+  // SAME VPC converge on one blast-radius and must group together, even though
+  // their direct association targets differ.
+  const vpcsByTgw = new Map<string, string[]>();
+  for (const att of topology.transitGatewayAttachments) {
+    if (att.resourceType === 'vpc' && att.resourceId) {
+      const list = vpcsByTgw.get(att.transitGatewayId);
+      if (list) list.push(att.resourceId);
+      else vpcsByTgw.set(att.transitGatewayId, [att.resourceId]);
+    }
+  }
+  const vpcsByVgw = new Map<string, string[]>();
+  for (const vgw of topology.vpnGateways) {
+    const vpcs = (vgw.vpcAttachments ?? []).map((a) => a.vpcId).filter(Boolean);
+    if (vpcs.length) vpcsByVgw.set(vgw.vpnGatewayId, vpcs);
+  }
+
+  const result = new Map<string, Set<string>>();
+  const add = (dxgwId: string, targetId: string | undefined) => {
+    if (!targetId) return;
+    let set = result.get(dxgwId);
+    if (!set) result.set(dxgwId, (set = new Set()));
+    set.add(targetId);
+  };
+  for (const assoc of topology.dxGatewayAssociations) {
+    const dxgwId = assoc.directConnectGatewayId;
+    const gwTargetId = assoc.associatedGateway?.id;
+    if (gwTargetId) {
+      add(dxgwId, gwTargetId);
+      // Keyed distinctly (`vpc:<id>`) so a shared VPC unions regardless of
+      // which TGW/VGW each DXGW went through.
+      const vpcs = vpcsByTgw.get(gwTargetId) ?? vpcsByVgw.get(gwTargetId) ?? [];
+      for (const vpcId of vpcs) add(dxgwId, `vpc:${vpcId}`);
+    }
+    add(dxgwId, assoc.associatedCoreNetwork?.id);
+  }
+  return result;
+}
+
+/**
+ * Display names of what `dxGatewayId` shares with `peerIds` — the reason the
+ * group is one blast-radius. A shared TGW / VGW / core network is named rather
+ * than every VPC behind it; a VPC is named only when the gateways reach it
+ * through DIFFERENT intermediates (the VGW-plus-TGW case), since that VPC is
+ * then the whole story.
+ */
+export function sharedDownstreamNames(
+  topology: TopologyData,
+  dxGatewayId: string,
+  peerIds: Iterable<string>,
+): string[] {
+  const byDxgw = downstreamTargetsByDxgw(topology);
+  const own = byDxgw.get(dxGatewayId) ?? new Set<string>();
+  const peerTargets = new Set<string>();
+  for (const id of peerIds) for (const t of byDxgw.get(id) ?? []) peerTargets.add(t);
+  const shared = [...own].filter((t) => peerTargets.has(t));
+  const sharedGateways = shared.filter((t) => !t.startsWith('vpc:'));
+
+  // VPCs already implied by a shared gateway aren't worth naming again.
+  const impliedVpcs = new Set<string>();
+  for (const gwId of sharedGateways) {
+    for (const a of topology.transitGatewayAttachments) {
+      if (a.transitGatewayId === gwId && a.resourceType === 'vpc') impliedVpcs.add(a.resourceId);
+    }
+    for (const a of topology.vpnGateways.find((g) => g.vpnGatewayId === gwId)?.vpcAttachments ?? []) {
+      impliedVpcs.add(a.vpcId);
+    }
+  }
+  const sharedVpcs = shared
+    .filter((t) => t.startsWith('vpc:'))
+    .map((t) => t.slice(4))
+    .filter((id) => !impliedVpcs.has(id));
+
+  const nameOf = (id: string): string =>
+    topology.transitGateways.find((t) => t.transitGatewayId === id)?.tags.Name
+    || topology.vpnGateways.find((g) => g.vpnGatewayId === id)?.tags.Name
+    || topology.vpcs.find((v) => v.vpcId === id)?.tags.Name
+    || id;
+  return [...sharedVpcs, ...sharedGateways].map(nameOf);
 }
 
 /**

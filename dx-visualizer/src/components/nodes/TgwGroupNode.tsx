@@ -5,6 +5,7 @@ import { COLORS } from '../../utils/colors';
 import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { TransitGatewayIcon } from './aws-icons';
+import { TagMarker } from './TagMarker';
 
 export function TgwGroupNode({ data, id }: NodeProps) {
   const d = data as DxNodeData;
@@ -15,6 +16,10 @@ export function TgwGroupNode({ data, id }: NodeProps) {
   const hasHoverActive = hoveredNodeId != null;
   const isOnHoverPath = hasHoverActive && highlightedNodeIds.has(id);
   const isDimmed = hasHoverActive && !isOnHoverPath;
+  // A collapsed group hides its TGWs, so name how many carry the filter's tags.
+  const taggedCount = useTopologyStore((s) => s.tagFilters.length > 0
+    ? (d.memberResourceIds ?? []).filter((tgwId) => s.tagMatchIds.has(tgwId)).length
+    : 0);
 
   // Use the node id directly as the toggle key (e.g. "tgwgroup-ap-southeast-1-dxgw-001")
   const groupKey = id;
@@ -56,6 +61,12 @@ export function TgwGroupNode({ data, id }: NodeProps) {
       >
         {d.childCount} TGWs
       </div>
+
+      {taggedCount > 0 && (
+        <span className={`flex items-center gap-1 text-[8px] mt-0.5 ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`}>
+          <TagMarker color={border} />{taggedCount} tagged
+        </span>
+      )}
 
       <span className={`text-[8px] mt-1 ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`}>
         Click to expand

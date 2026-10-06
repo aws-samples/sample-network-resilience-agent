@@ -5,6 +5,7 @@ import { COLORS } from '../../utils/colors';
 import { VPC_TABLE_MAX_BODY_HEIGHT, VPC_TABLE_WIDTH, dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { VpcIcon } from './aws-icons';
+import { TagMarker } from './TagMarker';
 
 export function VpcGroupNode({ data, id }: NodeProps) {
   const d = data as DxNodeData;
@@ -18,6 +19,7 @@ export function VpcGroupNode({ data, id }: NodeProps) {
   const hasHoverActive = hoveredNodeId != null;
   const isOnHoverPath = hasHoverActive && highlightedNodeIds.has(id);
   const isDimmed = hasHoverActive && !isOnHoverPath;
+  const tagMatchIds = useTopologyStore((s) => s.tagFilters.length > 0 ? s.tagMatchIds : null);
 
   const details = d.details as Record<string, string> | undefined;
   const groupKey = details?.groupKey ?? id.replace(/^vpcgroup-/, '');
@@ -26,6 +28,22 @@ export function VpcGroupNode({ data, id }: NodeProps) {
   const border = theme === 'light' ? COLORS.light.border : '#8b5cf6';
   const isTable = vpcGroupViewMode.has(groupKey);
   const vpcChildren = (d.vpcChildren as VpcChildInfo[] | undefined) ?? [];
+  // Named out loud so the count still adds up and the TGW's extra edge to a
+  // stand-alone VPC card reads as intentional.
+  const separateNote = d.separateVpcCount
+    ? `+${d.separateVpcCount} drawn separately`
+    : undefined;
+  const separateTitle = d.separateVpcCount
+    ? `${d.separateVpcCount} more VPC${d.separateVpcCount === 1 ? ' is' : 's are'} also attached to a Virtual Private Gateway, so ${d.separateVpcCount === 1 ? 'it is' : 'they are'} drawn as a separate card with a line from this Transit Gateway`
+    : undefined;
+  // Rows that carry the filter's tags themselves; the collapsed card names the
+  // count so a match hidden inside the group is not lost.
+  const taggedCount = tagMatchIds ? vpcChildren.filter((v) => tagMatchIds.has(v.vpcId)).length : 0;
+  const taggedNote = taggedCount > 0 ? (
+    <span className={`flex items-center gap-1 text-[8px] ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`}>
+      <TagMarker color={border} />{taggedCount} tagged
+    </span>
+  ) : null;
   const baseShadow = theme === 'light' ? COLORS.light.nodeShadow : '0 1px 3px rgba(0,0,0,0.3)';
   const dimOpacity = isDimmed ? dimOpacityFor('node', theme === 'light') : undefined;
 
@@ -63,6 +81,11 @@ export function VpcGroupNode({ data, id }: NodeProps) {
             <span className={`text-[10px] font-semibold ${theme === 'light' ? 'text-slate-700' : 'text-slate-200'}`}>
               {d.label}
             </span>
+            {separateNote && (
+              <span className={`text-[8px] ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`} title={separateTitle}>
+                {separateNote}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1">
             <div
@@ -129,6 +152,7 @@ export function VpcGroupNode({ data, id }: NodeProps) {
                   <td className={`px-2 py-1 ${theme === 'light' ? 'text-slate-700' : 'text-slate-300'}`}>
                     <div className="flex items-center gap-1 min-w-0">
                       <span className="truncate" title={vpc.name}>{vpc.name}</span>
+                      {tagMatchIds?.has(vpc.vpcId) && <TagMarker color={border} />}
                       {vpc.crossAccount && (
                         <span className="shrink-0 text-[7px] px-1 rounded bg-amber-500/20 text-amber-400">X</span>
                       )}
@@ -213,6 +237,7 @@ export function VpcGroupNode({ data, id }: NodeProps) {
           >
             {d.childCount} Isolated VPCs
           </div>
+          {taggedNote && <div className="mt-0.5">{taggedNote}</div>}
           <span className={`text-[8px] mt-1 ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`}>
             Click to expand
           </span>
@@ -255,6 +280,12 @@ export function VpcGroupNode({ data, id }: NodeProps) {
         {d.label}
       </div>
 
+      {separateNote && (
+        <span className={`text-[8px] mt-0.5 ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`} title={separateTitle}>
+          {separateNote}
+        </span>
+      )}
+      {taggedNote && <div className="mt-0.5">{taggedNote}</div>}
       <span className={`text-[8px] mt-1 ${theme === 'light' ? 'text-slate-500' : 'text-slate-400'}`}>
         Click to expand
       </span>
