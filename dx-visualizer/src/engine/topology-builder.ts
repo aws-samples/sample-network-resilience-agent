@@ -1,8 +1,12 @@
 import type { TopologyData, DxNode, DxEdge, DxNodeData, VpcChildInfo, VpcPeerInfo, TgwChildInfo, VgwChildInfo, DxgwChildInfo, HiddenAssocChildInfo, AggregatedVifInfo } from '../types/topology';
 import type { Vpc, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpnGateway, DxGateway, VpnTunnel } from '../types/aws-resources';
-import { LAYOUT, REGION_NAMES, VPC_TABLE_WIDTH, vpcTableHeight } from '../utils/constants';
+import { LAYOUT, NODE_DIMENSIONS, REGION_NAMES, VPC_TABLE_WIDTH, vpcTableHeight } from '../utils/constants';
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { COLORS } from '../utils/colors';
+
+// A collapsed VPC group card that carries the "+N drawn separately" note is one
+// text line taller than the stock card; reserve it so the column doesn't overlap.
+const VPC_GROUP_SEPARATE_NOTE_HEIGHT = NODE_DIMENSIONS.vpcGroup.height + 14;
 
 /** Build VPC node details, adding cross-account markers when applicable. */
 function vpcDetails(vpc: Vpc, region: string, homeAccountId: string): Record<string, string> {
@@ -789,6 +793,62 @@ export function buildGraph(
     return true;
   }
 
+  // The region a VGW is drawn in: its DXGW association's, else its VPCs'.
+  function vgwRegionOf(vgw: VpnGateway): string | undefined {
+    const assoc = topology.dxGatewayAssociations.find(
+      (a) => a.associatedGateway.id === vgw.vpnGatewayId
+    );
+    return assoc?.associatedGateway.region
+      ?? topology.vpcs.find((v) => vgw.vpcAttachments.some((a) => a.vpcId === v.vpcId))?.region;
+  }
+
+  // Non-DX VGW = no DXGW association, no VPN attached, no VIF pointing at it.
+  function isVgwNonDx(vgw: VpnGateway): boolean {
+    return !topology.dxGatewayAssociations.some((a) => a.associatedGateway.id === vgw.vpnGatewayId)
+      && !vpnVgwIds.has(vgw.vpnGatewayId)
+      && !vifVgwIds.has(vgw.vpnGatewayId);
+  }
+
+  // What the VGW section draws for one VGW in one region, or null when the VGW
+  // is not rendered in that region at all (isolated, or another region). The
+  // ONLY place these rules live: the VGW loop draws from it and
+  // vgwCardVpcIds predicts from it, so the two cannot drift. Any new filter
+  // or toggle on VGW rendering belongs here, not in the loop.
+  //   attachedVpcIds — every attached VPC, known or not (non-DX counting)
+  //   offPath        — non-DX VGW in a topology that has a DX story
+  //   drawn          — false when offPath and the region toggle hides it
+  //   cardVpcs       — VPCs drawn as their own card, in attachment order
+  function vgwPlacement(vgw: VpnGateway, region: string, showNonDx: boolean) {
+    if (isVgwIsolated(vgw) || vgwRegionOf(vgw) !== region) return null;
+    const attachedVpcIds = vgw.vpcAttachments
+      .filter((a) => a.state === 'attached')
+      .map((a) => a.vpcId);
+    const offPath = hasDxPresence && isVgwNonDx(vgw);
+    const drawn = !offPath || showNonDx;
+    const cardVpcs = drawn
+      ? attachedVpcIds
+        .map((id) => topology.vpcs.find((v) => v.vpcId === id))
+        .filter((v): v is Vpc => v !== undefined)
+      : [];
+    return { attachedVpcIds, offPath, drawn, cardVpcs };
+  }
+
+  // VPCs the VGW section below will draw as their own card in this region.
+  // Computed up front because TGWs render first: a VPC that is ALSO attached
+  // to a TGW whose VPCs collapse into a group card would otherwise appear
+  // twice — as a VGW-side card and as a row in the group — with nothing
+  // saying they are one VPC reachable two ways. That second path is exactly
+  // what makes a VGW-only DX site survivable (the shared-downstream grouping
+  // in the recommendation engine credits it), so the group leaves the VPC out
+  // and draws its TGW edge to the card instead.
+  function vgwCardVpcIds(region: string, showNonDx: boolean): Set<string> {
+    const ids = new Set<string>();
+    for (const vgw of topology.vpnGateways) {
+      for (const vpc of vgwPlacement(vgw, region, showNonDx)?.cardVpcs ?? []) ids.add(vpc.vpcId);
+    }
+    return ids;
+  }
+
   // TGW→VPC attachments whose edge was suppressed because the VPC sits off the
   // DX path (region "Show non DXGW association nodes" toggle is off). We hide
   // these edges to keep the canvas focused on the DX story — but a suppressed
@@ -812,6 +872,7 @@ export function buildGraph(
     const regionNode = makeNode(regionId, 'region', friendlyName, { details: { regionCode: region } });
     if (addNode(regionNode)) regionNodesByCode.set(region, regionNode);
     const showNonDx = showNonDxVpcs.has(region);
+    const vgwCardVpcs = vgwCardVpcIds(region, showNonDx);
 
     // --- Transit Gateways (grouped per DX Gateway) ---
     const regionTgws = topology.transitGateways.filter((t) => (t.transitGatewayArn.split(':')[3] || '') === region);
@@ -902,7 +963,11 @@ export function buildGraph(
 
       if (canCollapse && !isExpanded) {
         // --- Collapsed TGW group ---
-        addNode(makeNode(groupKey, 'tgwGroup', `${tgws.length} TGWs`, { childCount: tgws.length, details: { region } }));
+        addNode(makeNode(groupKey, 'tgwGroup', `${tgws.length} TGWs`, {
+          childCount: tgws.length,
+          memberResourceIds: tgws.map((t) => t.transitGatewayId),
+          details: { region },
+        }));
 
         // DX Gateway → TGW group edge
         if (dxgwId) {
@@ -936,20 +1001,31 @@ export function buildGraph(
 
         if (totalVpcCount >= LAYOUT.vpcCollapseThreshold && !expandedVpcGroups.has(groupKey)) {
           const vpcGroupId = `vpcgroup-${groupKey}`;
-          if (!nodeIds.has( vpcGroupId)) {
-            const vpcChildren = [
-              ...groupVpcs.map((v) => toVpcChildInfo(v, homeAccountId)),
-              ...groupCrossAccountAtts.map(crossAccountAttToVpcChildInfo),
-            ];
-            const isTable = vpcGroupViewMode.has(groupKey);
-            const extra: Partial<DxNodeData> = { childCount: totalVpcCount, vpcChildren, details: { region, groupKey } };
-            if (isTable) {
-              extra.computedWidth = VPC_TABLE_WIDTH;
-              extra.computedHeight = vpcTableHeight(vpcChildren.length);
+          const separateVpcs = groupVpcs.filter((v) => vgwCardVpcs.has(v.vpcId));
+          const listedVpcs = groupVpcs.filter((v) => !vgwCardVpcs.has(v.vpcId));
+          const listedCount = listedVpcs.length + groupCrossAccountAtts.length;
+          if (listedCount > 0) {
+            if (!nodeIds.has( vpcGroupId)) {
+              const vpcChildren = [
+                ...listedVpcs.map((v) => toVpcChildInfo(v, homeAccountId)),
+                ...groupCrossAccountAtts.map(crossAccountAttToVpcChildInfo),
+              ];
+              const isTable = vpcGroupViewMode.has(groupKey);
+              const extra: Partial<DxNodeData> = {
+                childCount: listedCount, vpcChildren, details: { region, groupKey },
+                ...(separateVpcs.length > 0 ? { separateVpcCount: separateVpcs.length } : {}),
+              };
+              if (isTable) {
+                extra.computedWidth = VPC_TABLE_WIDTH;
+                extra.computedHeight = vpcTableHeight(vpcChildren.length);
+              }
+              else if (separateVpcs.length > 0) extra.computedHeight = VPC_GROUP_SEPARATE_NOTE_HEIGHT;
+              addNode(makeNode(vpcGroupId, 'vpcGroup', `${listedCount} VPCs`, extra));
             }
-            addNode(makeNode(vpcGroupId, 'vpcGroup', `${totalVpcCount} VPCs`, extra));
+            edges.push(makeEdge(groupKey, vpcGroupId));
           }
-          edges.push(makeEdge(groupKey, vpcGroupId));
+          // The VGW section adds these cards; the edge lands once it does.
+          for (const v of separateVpcs) edges.push(makeEdge(groupKey, `vpc-${v.vpcId}`));
           groupVpcs.forEach((v) => connectedVpcIds.add(v.vpcId));
           groupCrossAccountAtts.forEach((a) => connectedVpcIds.add(a.resourceId));
         } else {
@@ -1004,10 +1080,19 @@ export function buildGraph(
           allGroupVpcIds.size >= LAYOUT.vpcCollapseThreshold &&
           !expandedVpcGroups.has(groupKey);
 
-        if (collapseVpcs) {
+        // VPCs drawn as their own card by the VGW section (see vgwCardVpcIds):
+        // left out of the group, each TGW edges to the card directly.
+        const separateVpcIds = collapseVpcs
+          ? new Set(topology.vpcs
+            .filter((v) => v.region === region && allGroupVpcIds.has(v.vpcId) && vgwCardVpcs.has(v.vpcId))
+            .map((v) => v.vpcId))
+          : new Set<string>();
+        const hasVpcGroupCard = collapseVpcs && allGroupVpcIds.size > separateVpcIds.size;
+
+        if (hasVpcGroupCard) {
           const vpcGroupId = `vpcgroup-${groupKey}`;
           if (!nodeIds.has(vpcGroupId)) {
-            const groupVpcs = topology.vpcs.filter((v) => v.region === region && allGroupVpcIds.has(v.vpcId));
+            const groupVpcs = topology.vpcs.filter((v) => v.region === region && allGroupVpcIds.has(v.vpcId) && !separateVpcIds.has(v.vpcId));
             // Gather cross-account attachments (VPCs not in topology.vpcs) across all TGWs
             const seenCrossAccount = new Set<string>();
             const groupCrossAccountAtts: { resourceId: string; resourceOwnerId: string; state: string }[] = [];
@@ -1027,15 +1112,19 @@ export function buildGraph(
               ...groupCrossAccountAtts.map(crossAccountAttToVpcChildInfo),
             ];
             const isTable = vpcGroupViewMode.has(groupKey);
-            const extra: Partial<DxNodeData> = { childCount: allGroupVpcIds.size, vpcChildren, details: { region, groupKey } };
+            const listedCount = allGroupVpcIds.size - separateVpcIds.size;
+            const extra: Partial<DxNodeData> = {
+              childCount: listedCount, vpcChildren, details: { region, groupKey },
+              ...(separateVpcIds.size > 0 ? { separateVpcCount: separateVpcIds.size } : {}),
+            };
             if (isTable) {
               extra.computedWidth = VPC_TABLE_WIDTH;
               extra.computedHeight = vpcTableHeight(vpcChildren.length);
-            }
-            addNode(makeNode(vpcGroupId, 'vpcGroup', `${allGroupVpcIds.size} VPCs`, extra));
+            } else if (separateVpcIds.size > 0) extra.computedHeight = VPC_GROUP_SEPARATE_NOTE_HEIGHT;
+            addNode(makeNode(vpcGroupId, 'vpcGroup', `${listedCount} VPCs`, extra));
           }
-          allGroupVpcIds.forEach((id) => connectedVpcIds.add(id));
         }
+        if (collapseVpcs) allGroupVpcIds.forEach((id) => connectedVpcIds.add(id));
 
         for (const tgw of tgws) {
           const tgwId = `tgw-${tgw.transitGatewayId}`;
@@ -1080,8 +1169,11 @@ export function buildGraph(
           );
 
           if (collapseVpcs) {
-            const vpcGroupId = `vpcgroup-${groupKey}`;
-            edges.push(makeEdge(tgwId, vpcGroupId));
+            if (hasVpcGroupCard) edges.push(makeEdge(tgwId, `vpcgroup-${groupKey}`));
+            // The VGW section adds these cards; the edge lands once it does.
+            for (const vpc of tgwVpcs) {
+              if (separateVpcIds.has(vpc.vpcId)) edges.push(makeEdge(tgwId, `vpc-${vpc.vpcId}`));
+            }
           } else if (!hideNonDxVpcs) {
             for (const vpc of tgwVpcs) {
               const vpcId = `vpc-${vpc.vpcId}`;
@@ -1203,35 +1295,23 @@ export function buildGraph(
 
     // --- VPN Gateways ---
     for (const vgw of topology.vpnGateways) {
-      // Isolated VGWs surface in the Unattached zone below — don't render
-      // them as standalone nodes in the region.
-      if (isVgwIsolated(vgw)) continue;
-      // Check if VGW belongs to this region via DX Gateway association
+      // Isolated VGWs surface in the Unattached zone below, and a VGW in
+      // another region renders there — vgwPlacement returns null for both.
+      // A non-DX VGW's VPCs are off-DX-path; hide VGW and VPCs unless the user
+      // has opted in to showing non-DX in this region. In a DX-less topology
+      // everything is on-path (mirrors the ungrouped-TGW escape above), so
+      // the suppression only applies when there's a DX story to focus on.
+      // All of that is decided in vgwPlacement, which vgwCardVpcIds shares.
+      const placement = vgwPlacement(vgw, region, showNonDx);
+      if (!placement) continue;
       const assoc = topology.dxGatewayAssociations.find(
         (a) => a.associatedGateway.id === vgw.vpnGatewayId
       );
-      // Also check via VPC attachments
-      const vgwRegion = assoc?.associatedGateway.region
-        ?? topology.vpcs.find((v) => vgw.vpcAttachments.some((a) => a.vpcId === v.vpcId))?.region;
-
-      if (vgwRegion !== region) continue;
-
-      // Non-DX VGW = no DXGW association, no VPN attached, no VIF pointing at
-      // it. Its VPCs are off-DX-path; hide VGW and VPCs unless the user has
-      // opted in to showing non-DX in this region. In a DX-less topology
-      // everything is on-path (mirrors the ungrouped-TGW escape above), so
-      // the suppression only applies when there's a DX story to focus on.
-      const vgwIsNonDx = !assoc && !vpnVgwIds.has(vgw.vpnGatewayId) && !vifVgwIds.has(vgw.vpnGatewayId);
       handledGatewayIds.add(vgw.vpnGatewayId);
-      if (vgwIsNonDx && hasDxPresence) {
-        const attachedVpcIds = vgw.vpcAttachments
-          .filter((a) => a.state === 'attached')
-          .map((a) => a.vpcId);
-        bumpNonDx(region, attachedVpcIds.length);
-        if (!showNonDx) {
-          for (const id of attachedVpcIds) connectedVpcIds.add(id);
-          continue;
-        }
+      if (placement.offPath) bumpNonDx(region, placement.attachedVpcIds.length);
+      if (!placement.drawn) {
+        for (const id of placement.attachedVpcIds) connectedVpcIds.add(id);
+        continue;
       }
 
       const vgwId = `vgw-${vgw.vpnGatewayId}`;
@@ -1258,10 +1338,7 @@ export function buildGraph(
       }
 
       // VGW → VPC edges
-      for (const attachment of vgw.vpcAttachments) {
-        if (attachment.state !== 'attached') continue;
-        const vpc = topology.vpcs.find((v) => v.vpcId === attachment.vpcId);
-        if (!vpc) continue;
+      for (const vpc of placement.cardVpcs) {
         const vpcId = `vpc-${vpc.vpcId}`;
         if (!nodeIds.has( vpcId)) {
           addNode(makeNode(vpcId, 'vpc', vpc.tags.Name || vpc.vpcId, {

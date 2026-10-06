@@ -8,7 +8,7 @@
 // `[key, value][]` tuples — Object.fromEntries would coerce numeric keys to
 // strings and be lossy for `utilizationCache`-shaped keys.
 
-import type { TopologyData, DxEdge, DxNode, ViewMode } from '../types/topology';
+import type { TopologyData, TopologyTagFilter, DxEdge, DxNode, ViewMode } from '../types/topology';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
 import type {
   TgwRouteTableWithRoutes,
@@ -104,6 +104,8 @@ export interface SerializedView {
   // Optional: snapshots predating the VPN filter have no value here, and they
   // were all taken with VPN visible. Import defaults it to true.
   showVpn?: boolean;
+  /** Optional for older snapshots. The underlying topology is always complete. */
+  tagFilters?: TopologyTagFilter[];
   showNonDxVpcs: string[];
   expandedUnattachedZone: boolean;
   expandedHiddenAssocZone: boolean;
@@ -243,6 +245,19 @@ export function validateSnapshot(parsed: unknown): SnapshotFile {
   }
   if (!file.view || typeof file.view !== 'object') {
     throw new SnapshotValidationError('Snapshot is missing view state.');
+  }
+  const { tagFilters } = file.view as Record<string, unknown>;
+  if (tagFilters !== undefined && (
+    !Array.isArray(tagFilters)
+    || !tagFilters.every((f: unknown) => {
+      if (!f || typeof f !== 'object') return false;
+      const filter = f as Record<string, unknown>;
+      return typeof filter.key === 'string' && filter.key.length > 0
+        && (filter.value === null || typeof filter.value === 'string');
+    })
+    || new Set(tagFilters.map((f: TopologyTagFilter) => f.key)).size !== tagFilters.length
+  )) {
+    throw new SnapshotValidationError('Snapshot contains invalid AWS tag filters.');
   }
   if (!file.customizations || typeof file.customizations !== 'object') {
     throw new SnapshotValidationError('Snapshot is missing customizations slice.');

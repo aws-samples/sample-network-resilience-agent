@@ -1298,6 +1298,10 @@ function DxGatewaySection({
 
       {isOpen && (
         <>
+          {gateway.siteRedundancyVia && !gateway.isUnattached && (
+            <SiteRedundancyNote via={gateway.siteRedundancyVia} light={light} />
+          )}
+
           {tierProgression && viewMode === 'recommended' && !gateway.isUnattached && (
             <div className="mb-3">
               <TierProgressionStrip
@@ -1333,6 +1337,38 @@ function DxGatewaySection({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Why a single-site gateway gets no "second location" ghost: another gateway
+ * reaches the same downstream from another DX location, so the engine counts
+ * the pair as site-redundant (downstream-grouping.ts). Without this the card's
+ * own-scope tier ("add a second location") contradicts the empty canvas.
+ */
+function SiteRedundancyNote({
+  via,
+  light,
+}: {
+  via: NonNullable<DxGatewayAssessment['siteRedundancyVia']>;
+  light: boolean;
+}) {
+  const peers = via.peers
+    .map((p) => `${p.dxGatewayName} (${p.locations.join(', ')})`)
+    .join(', ');
+  const shared = via.sharedDownstream.length > 0 ? via.sharedDownstream.join(', ') : 'the same downstream network';
+  return (
+    <div
+      className={`mb-3 rounded-lg border px-3.5 py-2.5 text-xs leading-relaxed ${
+        light
+          ? 'bg-sky-50 border-sky-200 text-sky-900'
+          : 'bg-sky-500/10 border-sky-400/30 text-sky-100'
+      }`}
+    >
+      <span className="font-semibold">Second site covered by {peers}.</span>{' '}
+      Both gateways reach {shared}, so traffic to it survives losing this gateway&apos;s location —
+      no second location is drawn for this gateway. The tier above scores this gateway on its own.
     </div>
   );
 }

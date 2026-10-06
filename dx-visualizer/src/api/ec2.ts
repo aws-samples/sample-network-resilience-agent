@@ -25,13 +25,7 @@ import { drainPages } from './paginate';
  */
 const EC2_MAX_PAGES = 1000;
 
-function tagsToRecord(tags: { Key?: string; Value?: string }[] | undefined): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const t of tags ?? []) {
-    if (t.Key) result[t.Key] = t.Value ?? '';
-  }
-  return result;
-}
+import { tagsToRecord } from '../utils/aws-tags';
 
 export async function fetchEnabledRegions(client: EC2Client): Promise<string[]> {
   // AllRegions defaults to false — returns only regions enabled for this
@@ -97,6 +91,7 @@ export async function fetchTransitGatewayAttachments(
       resourceOwnerId: a.ResourceOwnerId ?? '',
       state: a.State ?? '',
       name: tags.Name,
+      tags,
     };
   });
 }

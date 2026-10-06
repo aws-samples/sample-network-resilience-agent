@@ -5,6 +5,7 @@ import { COLORS } from '../../utils/colors';
 import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
 import { useRedact } from '../../utils/redact';
+import { TagMarker } from './TagMarker';
 
 export type NodeAccent = 'default' | 'crossAccount' | 'inferred';
 
@@ -91,6 +92,10 @@ export const BaseNode = memo(function BaseNode({
   // here must be motionless: this is the third attempt, and motion was the defect
   // both previous times.
   const isRouteDiffPath = useTopologyStore((s) => nodeId != null && s.routeDiffPickedNodeIds.has(nodeId));
+  // Carries the active tag filter's tags itself (vs. path context around a match).
+  const isTagMatch = useTopologyStore(
+    (s) => nodeId != null && s.tagFilters.length > 0 && s.tagMatchNodeIds.has(nodeId),
+  );
   const light = theme === 'light';
   const canGlow = !isFailed && !isRecommended;
 
@@ -218,9 +223,12 @@ export const BaseNode = memo(function BaseNode({
               className={`text-[10px] font-semibold leading-tight whitespace-pre-line ${theme === 'light' ? 'text-slate-800' : 'text-slate-200'}`}
               style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
             >{r(label)}</span>
-            {subtitle && (
-              <span className={`text-[8px] leading-tight ${theme === 'light' ? 'text-violet-500' : 'text-cyan-400'}`}>{subtitle}</span>
-            )}
+            {subtitle ? (
+              <span className={`flex items-center gap-1 text-[8px] leading-tight ${theme === 'light' ? 'text-violet-500' : 'text-cyan-400'}`}>
+                {subtitle}
+                {isTagMatch && <TagMarker color={effectiveBorder} />}
+              </span>
+            ) : isTagMatch && <TagMarker color={effectiveBorder} />}
             {children}
           </div>
         </div>

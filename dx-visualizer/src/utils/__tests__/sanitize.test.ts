@@ -8,6 +8,7 @@ function makeFixture(): TopologyData {
       {
         connectionId: 'dxcon-abc12345',
         connectionName: 'corp-payroll-prod',
+        tags: { Owner: 'network-ops@corp.example' },
         connectionState: 'available',
         location: 'EqDC2',
         bandwidth: '1Gbps',
@@ -22,6 +23,7 @@ function makeFixture(): TopologyData {
       {
         virtualInterfaceId: 'dxvif-deadbeef',
         virtualInterfaceName: 'finance-prod-vif',
+        tags: { Service: 'private-payroll-link' },
         virtualInterfaceType: 'transit',
         virtualInterfaceState: 'available',
         connectionId: 'dxcon-abc12345',
@@ -52,6 +54,7 @@ function makeFixture(): TopologyData {
       {
         directConnectGatewayId: '12345678-1234-1234-1234-123456789abc',
         directConnectGatewayName: 'corp-dxgw-prod',
+        tags: { Owner: 'gateway-admin@corp.example' },
         amazonSideAsn: 64512,
         directConnectGatewayState: 'available',
       },
@@ -65,7 +68,16 @@ function makeFixture(): TopologyData {
         availablePortSpeeds: ['1Gbps', '10Gbps'],
       },
     ],
-    lags: [],
+    lags: [{
+      lagId: 'dxlag-xy789012', lagName: 'payroll-bundle', connectionsBandwidth: '1Gbps',
+      numberOfConnections: 1, minimumLinks: 1, location: 'EqDC2', region: 'us-east-1',
+      lagState: 'available', tags: { Owner: 'carrier-team@corp.example' },
+      connections: [{
+        connectionId: 'dxcon-abc12345', connectionName: 'corp-payroll-prod',
+        connectionState: 'available', location: 'EqDC2', bandwidth: '1Gbps', region: 'us-east-1',
+        tags: { Owner: 'nested-port@corp.example' },
+      }],
+    }],
     vpcs: [
       {
         vpcId: 'vpc-0123456789abcdef',
@@ -95,6 +107,7 @@ function makeFixture(): TopologyData {
     transitGatewayAttachments: [
       {
         transitGatewayAttachmentId: 'tgw-attach-bbbb2222',
+        tags: { Project: 'finance-routing-project' },
         transitGatewayId: 'tgw-aaaa1111',
         resourceType: 'vpc',
         resourceId: 'vpc-0123456789abcdef',
@@ -114,7 +127,12 @@ function makeFixture(): TopologyData {
         tags: {},
       },
     ],
-    cloudWanCoreNetworks: [],
+    cloudWanCoreNetworks: [{
+      coreNetworkId: 'core-network-abc12345',
+      coreNetworkArn: 'arn:aws:networkmanager::111122223333:core-network/core-network-abc12345',
+      globalNetworkId: 'global-network-abc12345', description: 'Private backbone',
+      state: 'available', edges: [], segments: [], tags: { Owner: 'backbone-ops@corp.example' },
+    }],
     cloudWanAttachments: [],
     cloudWanPeerings: [],
     tgwRouteTables: new Map([
@@ -284,6 +302,17 @@ const REAL_VALUES_TO_PURGE = [
   'finance-prod',
   'alice@corp.example',
   'Production hub',
+  'network-ops@corp.example',
+  'private-payroll-link',
+  'gateway-admin@corp.example',
+  'payroll-bundle',
+  'carrier-team@corp.example',
+  'nested-port@corp.example',
+  'finance-routing-project',
+  'core-network-abc12345',
+  'global-network-abc12345',
+  'Private backbone',
+  'backbone-ops@corp.example',
   // Location & device leakage
   'EqDC2',
   'EqDC2-3jw9w7c4l',

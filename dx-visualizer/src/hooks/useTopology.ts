@@ -6,6 +6,7 @@ import { resolveAccountName } from '../api/organizations';
 import { buildGraph } from '../engine/topology-builder';
 import { applyLayout } from '../engine/layout-engine';
 import { analyzeTopology, getRecommendedGraph } from '../engine/recommendation-engine';
+import { filterTopologyByTags, getTagMatchIds, scopeTagRecommendations } from '../engine/tag-filter';
 import type { DxNode, TopologyData } from '../types/topology';
 
 /**
@@ -39,6 +40,7 @@ function rebuildFromTopology() {
     isolatedTgwGroupViewMode,
     showNonDxVpcs,
     showVpn,
+    tagFilters,
     expandedPartnerGroups,
     resiliencyTargets,
     focusedDxGatewayId,
@@ -52,8 +54,11 @@ function rebuildFromTopology() {
   } = useTopologyStore.getState();
   if (!topologyData) return;
 
+  const tagFiltered = filterTopologyByTags(topologyData, tagFilters);
+  const filteringByTag = tagFilters.length > 0;
+  const visibleTopology = showVpn ? tagFiltered : withoutVpn(tagFiltered);
   const { nodes, edges } = buildGraph(
-    showVpn ? topologyData : withoutVpn(topologyData),
+    visibleTopology,
     expandedVpcGroups,
     expandedTgwGroups,
     vpcGroupViewMode,
@@ -62,7 +67,7 @@ function rebuildFromTopology() {
     showNonDxVpcs,
     expandedPartnerGroups,
   );
-  // Always the FULL topology, never the VPN-stripped copy above. Hiding VPN is
+  // Always the FULL topology, never the tag-filtered or VPN-stripped copy above. Hiding VPN is
   // a canvas filter, not a change of scope: `bp-no-vpn-backup` warns when no
   // VPN exists, and `vpn-tunnel-redundancy` / `vpn-static-routes-only` /
   // `vpn-dpd` report real faults, so grading the stripped copy would both
@@ -101,15 +106,50 @@ function rebuildFromTopology() {
             : n,
         );
 
-  const layoutNodes = applyLayout(nodesWithBadges, edges, { expandedUnattachedZone, expandedHiddenAssocZone, nodeSizeOverrides, showUtilization });
+  const layoutOptions = {
+    expandedUnattachedZone,
+    expandedHiddenAssocZone,
+    nodeSizeOverrides,
+    showUtilization,
+  };
+  const layoutNodes = applyLayout(nodesWithBadges, edges, layoutOptions);
   setCurrentGraph(tagOrphans(layoutNodes), edges);
 
-  const { nodes: recNodes, edges: recEdges } = getRecommendedGraph(assessment, focusedDxGatewayId);
+  // Mark the tag matches themselves, so they read apart from the path context
+  // the filter keeps around them. Same predicate as the panel's count.
+  const tagMatchIds = getTagMatchIds(topologyData, tagFilters);
+  useTopologyStore.getState().setTagMatches(
+    tagMatchIds,
+    new Set(nodes
+      .filter((n) => n.data.resourceId != null && tagMatchIds.has(n.data.resourceId))
+      .map((n) => n.id)),
+  );
+
+  const recommendations = getRecommendedGraph(assessment, focusedDxGatewayId);
+  const { nodes: recNodes, edges: recEdges } = filteringByTag
+    ? scopeTagRecommendations(nodes, recommendations)
+    : recommendations;
 
   if (recNodes.length > 0) {
     const combined = [...nodesWithBadges, ...recNodes];
+    // Full-topology recommendations may reuse a real DX location outside the
+    // selected path. Its container is still needed for the recommended devices.
+    if (filteringByTag) {
+      const codes = new Set(combined.filter((n) => n.data.category === 'dxLocation').map((n) => n.data.details?.code));
+      for (const node of recNodes) {
+        const code = node.data.details?.locationCode;
+        if (typeof code !== 'string' || codes.has(code)) continue;
+        const location = topologyData.locations.find((l) => l.locationCode === code);
+        if (!location) continue;
+        codes.add(code);
+        combined.push({
+          id: `dxloc-${code}`, type: 'dxLocation', position: { x: 0, y: 0 },
+          data: { category: 'dxLocation', label: location.locationName, details: { code, region: location.region } },
+        });
+      }
+    }
     const allEdges = [...edges, ...recEdges];
-    const layoutAll = applyLayout(combined, allEdges, { expandedUnattachedZone, expandedHiddenAssocZone, nodeSizeOverrides, showUtilization });
+    const layoutAll = applyLayout(combined, allEdges, layoutOptions);
     const recNodeIds = new Set(recNodes.map((rn) => rn.id));
     const layoutCurrentForRec = tagOrphans(layoutAll.filter((n) => !recNodeIds.has(n.id)));
     const layoutRecNodes = layoutAll.filter((n) => recNodeIds.has(n.id));
@@ -137,6 +177,7 @@ export function useTopology() {
   // Hiding VPN changes which nodes buildGraph emits, so it has to rebuild the
   // graph — it can't be a render-time filter like showVpcs.
   const showVpn = useTopologyStore((s) => s.showVpn);
+  const tagFilters = useTopologyStore((s) => s.tagFilters);
   const expandedPartnerGroups = useTopologyStore((s) => s.expandedPartnerGroups);
   const resiliencyTargets = useTopologyStore((s) => s.resiliencyTargets);
   const focusedDxGatewayId = useTopologyStore((s) => s.focusedDxGatewayId);
@@ -247,7 +288,7 @@ export function useTopology() {
     if (topologyData) {
       rebuildFromTopology();
     }
-  }, [topologyData, expandedVpcGroups, expandedTgwGroups, vpcGroupViewMode, expandedIsolatedTgwGroups, isolatedTgwGroupViewMode, showNonDxVpcs, showVpn, expandedPartnerGroups, resiliencyTargets, focusedDxGatewayId, expandedUnattachedZone, expandedHiddenAssocZone, showUtilization]);
+  }, [topologyData, expandedVpcGroups, expandedTgwGroups, vpcGroupViewMode, expandedIsolatedTgwGroups, isolatedTgwGroupViewMode, showNonDxVpcs, showVpn, tagFilters, expandedPartnerGroups, resiliencyTargets, focusedDxGatewayId, expandedUnattachedZone, expandedHiddenAssocZone, showUtilization]);
 
 
   return { loadTopology };

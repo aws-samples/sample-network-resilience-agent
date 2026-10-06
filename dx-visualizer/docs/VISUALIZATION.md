@@ -24,6 +24,7 @@ Detailed documentation for the network diagram visualization, layout engine, int
 7. [Canvas Lock](#7-canvas-lock)
 8. [Failure Simulation](#8-failure-simulation)
 9. [Dark / Light Theme](#9-dark--light-theme)
+10. [AWS Tag Filters](#10-aws-tag-filters)
 
 ## 1. Network Components Visualized
 
@@ -97,6 +98,8 @@ All existing edges are solid purple bezier curves with animated flow dots. Recom
 ### 1.4 VPC Collapsing
 
 When a region has 4 or more VPCs attached to a Transit Gateway, they automatically collapse into a single `VpcGroupNode` showing a count badge (e.g., "8 VPCs"). Clicking the collapsed node expands to show individual VPCs. Threshold: `LAYOUT.vpcCollapseThreshold` in `utils/constants.ts` (default 4).
+
+A VPC that is **also** attached to a DX-reached VGW is left out of the group: the VGW section already draws it as its own card, so the TGW (or TGW group) edges to that card and the group reads `N VPCs` with a `+1 drawn separately` note. Before this it appeared twice — card and table row — with nothing saying it was one VPC reachable two ways, which is exactly the second path that lets the recommendation engine treat a VGW-only DX site as covered by another gateway (`groupDxGatewaysBySharedDownstream`). The per-DXGW card says so too: `siteRedundancyVia` on the assessment names the peer gateway, its site and what they share, and the card shows it as *Second site covered by …* above the tier options, so a single-site tier no longer contradicts an empty canvas. The tier itself still scores the gateway alone. At **Maximum** the peer's site needs two devices as well, and that site lies outside this gateway's own scope — so the engine mints the missing device there as this gateway's rec (fanned into this gateway, since a VIF here reaches everything behind it). *View all* skips it wherever the peer itself targets Maximum, because the peer's own device-gap ghost already fills that site. Pinned by `engine/__tests__/vpc-behind-vgw-and-tgw.test.ts`.
 
 ### 1.5 TGW Collapsing
 
@@ -342,3 +345,19 @@ When simulation mode is active:
 ## 9. Dark / Light Theme
 
 Toggle between dark and light themes from the overflow (three-dots) menu in the top bar — open the menu and choose Light mode / Dark mode. The theme affects all UI elements including the canvas background, node styling, edge colors, chat panel, and Resilience Status card.
+
+## 10. AWS Tag Filters
+
+The **View options** panel in the upper-right corner groups **Layers**, **AWS tags**, and **Legend** into sections with a shared width. It stays hidden on the landing page and appears after AWS data, demo data, or an imported snapshot loads. Each section expands independently; Layers appears only when the topology has VPN connections. The panel has one scrollbar on short screens, with its main header always reachable. Click **View options** to fold the whole panel away: active-filter and hidden-layer badges remain visible, and reopening restores the section states and unfinished tag selections.
+
+In **AWS tags**, choose a **Tag key**, select a value or **Any value**, then click **Add filter**. Add another key to narrow the selection: all selected tags must match the same resource. Keys and values are matched exactly and are case-sensitive; **(empty)** selects an empty value, while **Any value** requires the key to exist.
+
+The canvas shows matching resources with their upstream and downstream network paths. Selecting a production VPC keeps its gateways, Direct Connect paths and VPN backup visible, while unrelated sibling VPCs disappear. Selecting a connection shows the resources downstream of that connection. LAG member connections stay together. Peering relationships remain when selected directly or when both endpoints are already included.
+
+The panel lists tags captured from Direct Connect connections, VIFs, LAGs and gateways; VPCs, VPNs and customer/VPN/transit gateways; gateway attachments, peerings and route tables; and Cloud WAN resources. It uses the tags in the loaded topology and makes no additional AWS requests. Cross-account resources can only match tags available to the current account or obtained through the existing spoke-account enrichment. Older snapshots may lack tags on some resource types.
+
+Each selected key appears as a removable chip. **Clear all** restores the unfiltered view, and the collapsed header keeps an active-filter count visible. The match count counts AWS resources with matching tags, excluding the extra resources kept to show their paths. Each match carries a small tag icon so it reads apart from that path context: beside the type label on a card, on the header line of a VIF or DX connection label, and on the matching rows of a VPC table. A collapsed VPC or TGW group shows **N tagged** instead. The icon takes the colour of the card or label it sits on (purple for existing infrastructure, amber for cross-account, the VIF-type colour on a VIF label), so it adds no new colour to the canvas. Click the match count to zoom to the matches. Attachments, route tables and peerings count as matches but have no card to mark. Existing layer and collapse controls still apply: expand a group or the Unattached resources zone to inspect its matches. Recommendations stay attached to the visible infrastructure.
+
+Filtering changes the canvas only: the Resilience Status, chat context, route details and exported assessment still use the full topology. A snapshot contains the full topology plus the selected filters, so its recipient can clear the filters. Sanitized snapshots replace filter values with the same pseudonyms used for resource tags. Refresh preserves the selection; switching accounts or demo scenarios, signing out, or exiting an imported snapshot clears it. Signing out while an imported snapshot is pinned preserves its filters with the imported view.
+
+The demo VPCs include **Environment** and **Application** tags. For example, select **Environment = production** to try a filtered view without AWS credentials.

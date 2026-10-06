@@ -7,6 +7,8 @@ import { parseBandwidthToBps, formatBps } from '../utils/shared';
 import { useTopologyStore } from '../store/topology-store';
 import { useRedact } from '../utils/redact';
 import { VifRoutePanel } from '../components/nodes/VifRoutePanel';
+import { TagMarker } from '../components/nodes/TagMarker';
+import { edgeMatchesTag } from '../engine/tag-filter';
 import { isUserDrawnPair } from '../utils/user-edges';
 
 function useNodeCategory(nodeId: string): string | undefined {
@@ -90,6 +92,11 @@ export function CustomEdge({
   // a glow alone is easy to miss on a dense diagram. Softer than the hover fade
   // (0.15), because the rest of the topology is still the context for the answer.
   const isRouteDiffScoped = useTopologyStore((s) => s.routeDiffPickedVifIds.size > 0);
+  // A tagged VIF or DX connection is an edge label, not a card, so the tag
+  // marker goes on the label header. Stable boolean, same reason as above.
+  const isTagMatch = useTopologyStore(
+    (s) => s.tagFilters.length > 0 && edgeMatchesTag(data, s.tagMatchIds),
+  );
   const isRouteDiffMuted = isRouteDiffScoped && !isRouteDiffPicked;
   // Calendar spotlight and route-diff pick are the same visual affordance — "this
   // is the edge that was just named" — so they render identically from here on.
@@ -723,7 +730,8 @@ export function CustomEdge({
                   : (i === 1 || isCidr) ? idColor
                   : subTextColor;
                 return (
-                  <div key={i} className={isStatusLine ? 'flex items-center justify-center gap-1' : undefined} style={{ color }}>
+                  <div key={i} className={isStatusLine || (i === 0 && isTagMatch) ? 'flex items-center justify-center gap-1' : undefined} style={{ color }}>
+                    {i === 0 && isTagMatch && <TagMarker color={color} />}
                     {isStatusLine && (
                       <span style={{
                         width: 6, height: 6, borderRadius: '50%', display: 'inline-block',

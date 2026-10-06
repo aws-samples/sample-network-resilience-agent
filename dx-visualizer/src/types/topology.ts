@@ -136,6 +136,12 @@ export interface PublicVifResource {
 
 export type ViewMode = 'current' | 'recommended';
 
+/** All keys must match on one resource; null matches any value, including empty. */
+export interface TopologyTagFilter {
+  key: string;
+  value: string | null;
+}
+
 export interface GraphData {
   nodes: Node[];
   edges: Edge[];
@@ -244,6 +250,9 @@ export interface DxNodeData extends Record<string, unknown> {
   details?: Record<string, string>;
   badges?: NodeBadge[];
   childCount?: number;
+  // Resource ids folded into a collapsed group card that carries no per-child
+  // rows (e.g. `tgwGroup`), so the card can say how many match a tag filter.
+  memberResourceIds?: string[];
   isExpanded?: boolean;
   targetHandleIds?: string[];
   hasTopHandle?: boolean;
@@ -258,6 +267,9 @@ export interface DxNodeData extends Record<string, unknown> {
   // edges that all leave the same handle.
   vpcPeers?: VpcPeerInfo[];
   vpcChildren?: VpcChildInfo[];
+  // vpcGroup only: VPCs left out of `vpcChildren` because they are already drawn
+  // as their own card (behind a VGW), with this group's TGW edged to that card.
+  separateVpcCount?: number;
   tgwChildren?: TgwChildInfo[];
   vgwChildren?: VgwChildInfo[];
   dxgwChildren?: DxgwChildInfo[];

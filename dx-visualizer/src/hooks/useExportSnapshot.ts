@@ -148,6 +148,11 @@ export function useExportSnapshot() {
       // The filter travels as a preference while the VPN data itself stays in
       // the snapshot, so whoever opens it can put VPN back on the canvas.
       showVpn: state.showVpn,
+      // Reuse the topology's sanitizer so selected values still match after import.
+      tagFilters: state.tagFilters.map((filter) => ({
+        ...filter,
+        value: sanitizer && filter.value !== null ? sanitizer.tagValue(filter.value) : filter.value,
+      })),
       showNonDxVpcs: [...state.showNonDxVpcs],
       expandedUnattachedZone: state.expandedUnattachedZone,
       expandedHiddenAssocZone: state.expandedHiddenAssocZone,

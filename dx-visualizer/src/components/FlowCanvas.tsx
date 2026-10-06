@@ -42,6 +42,11 @@ import { AwsCloudNode } from './nodes/AwsCloudNode';
 import { PublicResourcesNode } from './nodes/PublicResourcesNode';
 import { CustomEdge } from '../edges/CustomEdge';
 import { LayersPanel } from './LayersPanel';
+import { TagFilterPanel } from './TagFilterPanel';
+import { ViewOptionsPanel, ViewOptionsSection } from './ViewOptionsPanel';
+import { tagFilteredCustomNodeIds, tagFitNodeIds } from '../engine/tag-filter';
+import type { DxEdge, DxNode } from '../types/topology';
+import { COLORS } from '../utils/colors';
 
 const nodeTypes = {
   customerSite: CustomerSiteNode,
@@ -101,6 +106,7 @@ export function FlowCanvas() {
   const failZone = useTopologyStore((s) => s.failZone);
   const failedNodeIds = useTopologyStore((s) => s.failedNodeIds);
   const showVpcs = useTopologyStore((s) => s.showVpcs);
+  const tagFilters = useTopologyStore((s) => s.tagFilters);
   const isLocked = useTopologyStore((s) => s.isLocked);
   const setIsLocked = useTopologyStore((s) => s.setIsLocked);
   const homeAccountId = useTopologyStore((s) => s.topologyData?.homeAccountId);
@@ -130,8 +136,54 @@ export function FlowCanvas() {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [legendOverride, setLegendOverride] = useState<boolean | null>(null);
   const updateNodeInternals = useUpdateNodeInternals();
-  const { getNodes, getNode } = useReactFlow();
+  const { getNodes, getNode, getEdges, fitView } = useReactFlow();
   const dropTargetRef = useRef<string | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const sideControlsRef = useRef<HTMLDivElement>(null);
+  const lastTagFiltersRef = useRef(tagFilters);
+
+  useEffect(() => {
+    if (lastTagFiltersRef.current === tagFilters) return;
+    lastTagFiltersRef.current = tagFilters;
+    // Let the filtered graph rebuild and React Flow measure its nodes before
+    // fitting it. Reserve the actual controls width so a match is not obscured.
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        const canvas = canvasRef.current?.getBoundingClientRect();
+        const controls = sideControlsRef.current?.getBoundingClientRect();
+        const rightPadding = canvas && controls ? canvas.right - controls.left : 0;
+        void fitView({
+          padding: { top: '10%', bottom: '10%', left: '5%', right: `${rightPadding}px` },
+          minZoom: tagFilters.length > 0 ? 0.1 : 0.3,
+          duration: 250,
+        });
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, [tagFilters, fitView]);
+
+  // "N matching resources" in the tag panel: frame just the matches.
+  const tagFitRequest = useTopologyStore((s) => s.tagFitRequest);
+  useEffect(() => {
+    if (tagFitRequest === 0) return;
+    const { tagMatchIds, tagMatchNodeIds } = useTopologyStore.getState();
+    const ids = tagFitNodeIds(getNodes() as DxNode[], getEdges() as DxEdge[], tagMatchIds, tagMatchNodeIds);
+    if (ids.length === 0) return;
+    const canvas = canvasRef.current?.getBoundingClientRect();
+    const controls = sideControlsRef.current?.getBoundingClientRect();
+    const rightPadding = canvas && controls ? canvas.right - controls.left : 0;
+    void fitView({
+      nodes: ids.map((id) => ({ id })),
+      padding: { top: '15%', bottom: '15%', left: '10%', right: `${rightPadding}px` },
+      minZoom: 0.1,
+      maxZoom: 1.25,
+      duration: 250,
+    });
+  }, [tagFitRequest, getNodes, getEdges, fitView]);
 
   // Toggling Live mode adds/removes a status row inside live-capable nodes,
   // which shifts the Handle's vertical position. React Flow caches handle
@@ -518,6 +570,11 @@ export function FlowCanvas() {
     let all = viewMode === 'recommended'
       ? [...baseNodes, ...recommendedNodes]
       : [...baseNodes];
+    const visibleCustomIds = tagFilters.length > 0
+      ? tagFilteredCustomNodeIds(all, [...userCustomerSites, ...userOnPremises], [
+        ...userEdges, ...edgeReconnectOverrides.values(),
+      ])
+      : null;
 
     // Filter out VPC nodes if hidden
     if (!showVpcs) {
@@ -571,6 +628,7 @@ export function FlowCanvas() {
         cursorY = last.position.y + (last.height ?? (last.style?.height as number) ?? 120) + 24;
       }
       for (const site of userCustomerSites) {
+        if (visibleCustomIds && !visibleCustomIds.has(site.id)) continue;
         const h = (site.height ?? (site.style?.height as number) ?? 120);
         const placed = (site.data as Record<string, unknown>)?.userPlaced === 'true';
         if (placed) {
@@ -592,6 +650,7 @@ export function FlowCanvas() {
       const ROUTER_GAP = 12;
       const byParent = new Map<string, typeof userOnPremises>();
       for (const r of userOnPremises) {
+        if (visibleCustomIds && !visibleCustomIds.has(r.id)) continue;
         const pid = r.parentId ?? (r.data.details as Record<string, string> | undefined)?.parentSiteId;
         if (!pid) continue;
         const arr = byParent.get(pid) ?? [];
@@ -709,7 +768,7 @@ export function FlowCanvas() {
       return depthA - depthB;
     });
     return mapped;
-  }, [viewMode, currentNodes, recommendedNodes, recommendedCurrentNodes, currentEdges, recommendedEdges, showVpcs, userCustomerSites, hiddenCustomerSiteIds, userOnPremises, hiddenOnPremiseIds]);
+  }, [viewMode, currentNodes, recommendedNodes, recommendedCurrentNodes, currentEdges, recommendedEdges, showVpcs, userCustomerSites, hiddenCustomerSiteIds, userOnPremises, hiddenOnPremiseIds, tagFilters, userEdges, edgeReconnectOverrides]);
 
   const hiddenNodeIds = useMemo(() => {
     if (showVpcs) return new Set<string>();
@@ -748,8 +807,12 @@ export function FlowCanvas() {
       all = all.filter((e) => !hiddenOnPremiseIds.has(e.source) && !hiddenOnPremiseIds.has(e.target));
     }
 
+    if (tagFilters.length > 0) {
+      const visibleIds = new Set(nodes.map((n) => n.id));
+      all = all.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target));
+    }
     return all;
-  }, [viewMode, currentEdges, recommendedEdges, hiddenNodeIds, hiddenEdgeIds, edgeReconnectOverrides, userEdges, hiddenOnPremiseIds]);
+  }, [viewMode, currentEdges, recommendedEdges, hiddenNodeIds, hiddenEdgeIds, edgeReconnectOverrides, userEdges, hiddenOnPremiseIds, tagFilters, nodes]);
 
   const { crossAccountIds, hasCrossAccount } = useMemo(() => {
     const ids = new Set<string>();
@@ -873,7 +936,7 @@ export function FlowCanvas() {
   }, [isLocked, isSimulating, selectedEdgeId, viewMode, currentNodes, currentEdges, recommendedNodes, recommendedEdges, recommendedCurrentNodes, userOnPremises, userEdges, hideEdge]);
 
   return (
-    <div className="relative w-full h-full" style={{
+    <div ref={canvasRef} className="relative w-full h-full" style={{
       background: light
         ? '#eef1f6'
         : 'radial-gradient(ellipse at 50% 50%, #131c2e 0%, #0f172a 60%, #0a0f1a 100%)',
@@ -894,7 +957,7 @@ export function FlowCanvas() {
         onPaneClick={onPaneClick}
         fitView
         fitViewOptions={{ padding: 0.15 }}
-        minZoom={0.3}
+        minZoom={tagFilters.length > 0 ? 0.1 : 0.3}
         maxZoom={2}
         defaultEdgeOptions={{ type: 'customEdge' }}
         proOptions={{ hideAttribution: true }}
@@ -993,77 +1056,66 @@ export function FlowCanvas() {
           nodeColor={miniMapNodeColor}
           maskColor={light ? 'rgba(226, 229, 235, 0.8)' : 'rgba(15, 23, 42, 0.8)'}
         />
-        {/* Legend and Layers share ONE top-right Panel. Two Panels with the
-            same `position` would both be absolutely positioned at the corner
-            and overlap; stacking them in a flex column here is what puts
-            Layers under the Legend. */}
-        <Panel position="top-right">
-          <div className="flex flex-col items-end gap-2">
-          <div className={`rounded-lg text-[10px] font-tech ${
-            light
-              ? 'bg-gray-100/90 border border-gray-300 text-gray-600 shadow-sm'
-              : 'bg-slate-800/90 border border-slate-600 text-slate-300 shadow-lg'
-          }`}>
-            <button
-              onClick={() => setLegendOverride(!showLegend)}
-              aria-expanded={showLegend}
-              aria-label="Toggle legend"
-              className={`flex items-center gap-1.5 w-full px-3 py-1.5 cursor-pointer ${
-                light ? 'hover:bg-gray-50' : 'hover:bg-slate-700/50'
-              } ${showLegend ? 'rounded-t-lg' : 'rounded-lg'}`}
-            >
-              <span className="font-semibold">Legend</span>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-3 h-3 ml-auto transition-transform ${showLegend ? '' : '-rotate-90'}`}>
-                <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
-              </svg>
-            </button>
-            {showLegend && (
-              <div className={`flex flex-col gap-1.5 px-3 pb-2 pt-1 ${
-                light ? 'border-t border-gray-100' : 'border-t border-slate-700'
-              }`}>
-                <div className="flex items-center gap-2">
-                  <span className="inline-block w-3 h-3 rounded-sm border-2" style={{ borderColor: '#8B5CF6', background: light ? '#F5F3FF' : '#1e1b4b' }} />
-                  <span>
-                    {homeAccountName && !redactMode ? (
-                      <>
-                        {homeAccountName}
-                        {homeAccountId && <span> ({r(homeAccountId)})</span>}
-                      </>
-                    ) : (
-                      r(homeAccountId)
-                    )}
-                  </span>
+        {/* Keep every view control in one Panel so they share a width and cannot
+            overlap. They become available once a topology has loaded. */}
+        {topologyData && (
+          <Panel
+            position="top-right"
+            className="nowheel"
+            style={{ display: 'flex', maxWidth: 'calc(100% - 2rem)', maxHeight: 'calc(100% - 2rem)' }}
+          >
+            <ViewOptionsPanel panelRef={sideControlsRef}>
+              <LayersPanel />
+              <TagFilterPanel />
+              <ViewOptionsSection
+                title="Legend"
+                toggleLabel="Toggle legend"
+                expanded={showLegend}
+                onToggle={() => setLegendOverride(!showLegend)}
+              >
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-start gap-2">
+                    <span className="inline-block w-3 h-3 rounded-sm border-2 mt-0.5 shrink-0" style={{ borderColor: COLORS.existing.border, background: light ? COLORS.existing.bg : COLORS.existing.darkBg }} />
+                    <span className="min-w-0 flex-1 break-words leading-snug">
+                      {homeAccountName && !redactMode ? (
+                        <>
+                          {homeAccountName}
+                          {homeAccountId && <span> ({r(homeAccountId)})</span>}
+                        </>
+                      ) : (
+                        r(homeAccountId)
+                      )}
+                    </span>
+                  </div>
+                  {hasCrossAccount && (
+                    <div className="flex items-start gap-2">
+                      <span className="inline-block w-3 h-3 rounded-sm border-2 mt-0.5 shrink-0" style={{ borderColor: light ? COLORS.crossAccount.lightBorder : COLORS.crossAccount.border, background: light ? COLORS.crossAccount.bg : COLORS.crossAccount.darkBg }} />
+                      <span className="min-w-0 flex-1 break-words leading-snug">
+                        {crossAccountIds.length > 0
+                          ? <>Cross-account ({crossAccountIds.map((id) => r(id)).join(', ')})</>
+                          : 'Cross-account resource'}
+                      </span>
+                    </div>
+                  )}
+                  {hasInferredConnection && (
+                    <div className="flex items-start gap-2">
+                      <span className="inline-block w-3 h-3 rounded-sm border-2 mt-0.5 shrink-0" style={{ borderColor: light ? COLORS.inferredConnection.lightBorder : COLORS.inferredConnection.border, background: light ? COLORS.inferredConnection.bg : COLORS.inferredConnection.darkBg }} />
+                      <span className="min-w-0 flex-1 break-words leading-snug">
+                        Hosted VIF on external cable
+                      </span>
+                    </div>
+                  )}
+                  {viewMode === 'recommended' && (
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 shrink-0 rounded-sm border-2 border-dashed" style={{ borderColor: COLORS.recommended.border, background: light ? COLORS.recommended.bg : COLORS.recommended.darkBg }} />
+                      <span>Recommendation</span>
+                    </div>
+                  )}
                 </div>
-                {hasCrossAccount && (
-                  <div className="flex items-start gap-2" style={{ maxWidth: 240 }}>
-                    <span className="inline-block w-3 h-3 rounded-sm border-2 mt-[2px] shrink-0" style={{ borderColor: light ? '#d97706' : '#F59E0B', background: light ? '#FFFBEB' : '#451a03' }} />
-                    <span className="leading-snug">
-                      {crossAccountIds.length > 0
-                        ? <>Cross-account ({crossAccountIds.map((id) => r(id)).join(', ')})</>
-                        : 'Cross-account resource'}
-                    </span>
-                  </div>
-                )}
-                {hasInferredConnection && (
-                  <div className="flex items-start gap-2" style={{ maxWidth: 240 }}>
-                    <span className="inline-block w-3 h-3 rounded-sm border-2 mt-[2px] shrink-0" style={{ borderColor: light ? '#a16207' : '#FACC15', background: light ? '#FEFCE8' : '#422006' }} />
-                    <span className="leading-snug">
-                      Hosted VIF on external cable
-                    </span>
-                  </div>
-                )}
-                {viewMode === 'recommended' && (
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block w-3 h-3 rounded-sm border-2 border-dashed" style={{ borderColor: '#10B981', background: light ? '#ECFDF5' : '#022c22' }} />
-                    <span>Recommendation</span>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <LayersPanel />
-          </div>
-        </Panel>
+              </ViewOptionsSection>
+            </ViewOptionsPanel>
+          </Panel>
+        )}
       </ReactFlow>
     </div>
   );

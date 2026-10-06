@@ -8,13 +8,7 @@ import {
 } from '@aws-sdk/client-networkmanager';
 import type { CloudWanCoreNetwork, CloudWanAttachment, CloudWanPeering, CloudWanSegmentRoutes, CloudWanRoute } from '../types/aws-resources';
 
-function tagsToRecord(tags?: { Key?: string; Value?: string }[]): Record<string, string> {
-  const rec: Record<string, string> = {};
-  for (const t of tags ?? []) {
-    if (t.Key) rec[t.Key] = t.Value ?? '';
-  }
-  return rec;
-}
+import { tagsToRecord } from '../utils/aws-tags';
 
 export async function fetchCoreNetworks(client: NetworkManagerClient): Promise<CloudWanCoreNetwork[]> {
   const listRes = await client.send(new ListCoreNetworksCommand({}));
@@ -32,6 +26,7 @@ export async function fetchCoreNetworks(client: NetworkManagerClient): Promise<C
       coreNetworkArn: cn.CoreNetworkArn ?? '',
       globalNetworkId: cn.GlobalNetworkId ?? '',
       description: cn.Description ?? '',
+      tags: tagsToRecord(cn.Tags),
       state: (cn.State ?? '').toLowerCase(),
       edges: (cn.Edges ?? []).map(e => ({
         edgeLocation: e.EdgeLocation ?? '',

@@ -1,4 +1,6 @@
 export interface DxConnection {
+  /** Optional for snapshots captured before tags were retained. */
+  tags?: Record<string, string>;
   connectionId: string;
   connectionName: string;
   connectionState: string;
@@ -88,6 +90,7 @@ export interface BgpPeer {
 }
 
 export interface DxVirtualInterface {
+  tags?: Record<string, string>;
   virtualInterfaceId: string;
   virtualInterfaceName: string;
   virtualInterfaceType: 'private' | 'public' | 'transit';
@@ -227,6 +230,7 @@ export interface BgpSessionStability {
 }
 
 export interface DxGateway {
+  tags?: Record<string, string>;
   directConnectGatewayId: string;
   directConnectGatewayName: string;
   amazonSideAsn: number;
@@ -276,6 +280,7 @@ export interface DxLocation {
 }
 
 export interface DxLag {
+  tags?: Record<string, string>;
   lagId: string;
   lagName: string;
   connectionsBandwidth: string;
@@ -319,6 +324,7 @@ export interface TransitGateway {
 }
 
 export interface TransitGatewayAttachment {
+  tags?: Record<string, string>;
   transitGatewayAttachmentId: string;
   transitGatewayId: string;
   resourceType: 'vpc' | 'vpn' | 'direct-connect-gateway' | 'peering' | 'connect' | 'network-function';
@@ -410,6 +416,7 @@ export interface CustomerGateway {
 }
 
 export interface CloudWanCoreNetwork {
+  tags?: Record<string, string>;
   coreNetworkId: string;
   coreNetworkArn: string;
   globalNetworkId: string;

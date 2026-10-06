@@ -12,6 +12,7 @@ import {
   ListVirtualInterfaceTestHistoryCommand,
 } from '@aws-sdk/client-direct-connect';
 import type { RouteDirection } from '@aws-sdk/client-direct-connect';
+import { tagsToRecord } from '../utils/aws-tags';
 import type {
   DxConnection,
   DxVirtualInterface,
@@ -76,6 +77,7 @@ export async function fetchConnections(client: DirectConnectClient): Promise<DxC
       const res = await client.send(new DescribeConnectionsCommand({ nextToken }));
       const items = (res.connections ?? []).map((c) => ({
         connectionId: c.connectionId ?? '',
+        tags: tagsToRecord(c.tags),
         connectionName: c.connectionName ?? '',
         connectionState: c.connectionState ?? '',
         location: c.location ?? '',
@@ -105,6 +107,7 @@ export async function fetchVirtualInterfaces(client: DirectConnectClient): Promi
       const res = await client.send(new DescribeVirtualInterfacesCommand({ nextToken }));
       const items = (res.virtualInterfaces ?? []).map((v) => ({
         virtualInterfaceId: v.virtualInterfaceId ?? '',
+        tags: tagsToRecord(v.tags),
         virtualInterfaceName: v.virtualInterfaceName ?? '',
         virtualInterfaceType: (v.virtualInterfaceType ?? 'private') as 'private' | 'public' | 'transit',
         virtualInterfaceState: v.virtualInterfaceState ?? '',
@@ -156,6 +159,7 @@ export async function fetchDxGateways(client: DirectConnectClient): Promise<DxGa
       const res = await client.send(new DescribeDirectConnectGatewaysCommand({ nextToken }));
       const items = (res.directConnectGateways ?? []).map((g) => ({
         directConnectGatewayId: g.directConnectGatewayId ?? '',
+        tags: tagsToRecord(g.tags),
         directConnectGatewayName: g.directConnectGatewayName ?? '',
         amazonSideAsn: Number(g.amazonSideAsn ?? 0),
         directConnectGatewayState: g.directConnectGatewayState ?? '',
@@ -337,6 +341,7 @@ export async function fetchLags(client: DirectConnectClient): Promise<DxLag[]> {
       const res = await client.send(new DescribeLagsCommand({ nextToken }));
       const items = (res.lags ?? []).map((l) => ({
         lagId: l.lagId ?? '',
+        tags: tagsToRecord(l.tags),
         lagName: l.lagName ?? '',
         connectionsBandwidth: l.connectionsBandwidth ?? '',
         numberOfConnections: l.numberOfConnections ?? 0,
@@ -348,6 +353,7 @@ export async function fetchLags(client: DirectConnectClient): Promise<DxLag[]> {
         prefixPool: prefixPool(l),
         connections: (l.connections ?? []).map((c) => ({
           connectionId: c.connectionId ?? '',
+          tags: tagsToRecord(c.tags),
           connectionName: c.connectionName ?? '',
           connectionState: c.connectionState ?? '',
           location: c.location ?? '',

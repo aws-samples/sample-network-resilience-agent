@@ -34,7 +34,7 @@ import {
   getAllBestPracticeResults,
 } from './bestpractice-rules';
 import { getLocationDeviceCounts, findReusableLocation, findReusableSinkLocation, getSinkConnectedDevices, getUsedLocations, type SinkDeviceInfo } from './sla-gating';
-import { groupDxGatewaysBySharedDownstream, getGroupLocations } from './downstream-grouping';
+import { groupDxGatewaysBySharedDownstream, getGroupLocations, sharedDownstreamNames } from './downstream-grouping';
 
 function determineResiliencyLevel(topology: TopologyData): ResiliencyLevel {
   if (topology.connections.length === 0 && topology.virtualInterfaces.length === 0) return 'none';
@@ -565,6 +565,45 @@ export function analyzeTopology(
           groupIsSiteRedundant,
         )
       : undefined;
+    // Maximum over a site-redundant group: the second location is a PEER
+    // gateway's site, and Maximum wants two devices there too. This gateway's
+    // own scope never sees that site, so without this the Maximum pick draws
+    // nothing at all. The ghost fans into THIS gateway (a new VIF here reaches
+    // everything behind it, not just what the peer shares). In the aggregate
+    // view it is skipped where a peer already targets Maximum at that site —
+    // the peer's own device-gap ghost fills it and a second would over-draw —
+    // but the focused view always shows it, since only this gateway is drawn.
+    const peerSiteGapRecs = (target: ResiliencyTarget, forAggregate: boolean): Recommendation[] => {
+      if (target !== 'maximum' || lagIsMaximum || scope.lags.length > 0 || !groupIsSiteRedundant) return [];
+      const skip = new Set<string>([...scopeLocations, ...(groupDeviceRedundantLocations ?? [])]);
+      if (forAggregate) {
+        for (const peerId of group) {
+          if (peerId === gw.directConnectGatewayId) continue;
+          const peerScope = buildDxgwScope(topology, peerId);
+          const peerLevel = determineResiliencyLevel(peerScope);
+          const peerTarget = peerLevel === 'high' || peerLevel === 'maximum' ? 'maximum' : resolveTarget(peerId);
+          if (peerTarget === 'maximum') for (const loc of getUsedLocations(peerScope)) skip.add(loc);
+        }
+      }
+      return ruleSingleConnectionPerLocation(
+        buildDxgwGroupScope(topology, group),
+        'maximum',
+        gw.directConnectGatewayId,
+        false,
+        undefined,
+        skip,
+      );
+    };
+    const aggregatePeerGaps = peerSiteGapRecs(effectiveTarget, true);
+    const focusPeerGaps = peerSiteGapRecs(rawTarget, false);
+    recs.push(...aggregatePeerGaps);
+    const focusWithPeerGaps = focusPeerGaps.length > 0 || focusRecs
+      ? [
+          ...(focusRecs ?? recs.filter((r) => !aggregatePeerGaps.includes(r))),
+          ...focusPeerGaps,
+        ]
+      : undefined;
+
     // When this DXGW carries the public VIF, stash a copy of its ghost chain
     // minted at the PUBLIC VIF's tier (not this gateway's escalated tier) so the
     // focused Public VIF view reuses a carrier drawn at the public tier. Only
@@ -602,6 +641,29 @@ export function analyzeTopology(
         (runningDeviceCounts.get(reuseLocationCode) ?? 0) + added,
       );
     }
+    // runPerDxgwRules skipped the second-location rec because the group spans
+    // 2+ sites — say who supplies the other site, or the card's single-site
+    // tier reads as a gap the canvas refuses to draw.
+    let siteRedundancyVia: DxGatewayAssessment['siteRedundancyVia'];
+    if (!lagIsMaximum && scope.lags.length === 0 && groupIsSiteRedundant && scopeLocations.size < 2) {
+      const locationName = (code: string) =>
+        topology.locations.find((l) => l.locationCode === code)?.locationName || code;
+      const peers = [...group]
+        .filter((id) => id !== gw.directConnectGatewayId)
+        .map((id) => ({
+          dxGatewayId: id,
+          dxGatewayName: topology.dxGateways.find((g) => g.directConnectGatewayId === id)?.directConnectGatewayName || id,
+          locations: [...getGroupLocations(topology, new Set([id]))].filter((code) => !scopeLocations.has(code)),
+        }))
+        .filter((p) => p.locations.length > 0)
+        .map((p) => ({ ...p, locations: p.locations.map(locationName) }));
+      if (peers.length > 0) {
+        siteRedundancyVia = {
+          peers,
+          sharedDownstream: sharedDownstreamNames(topology, gw.directConnectGatewayId, peers.map((p) => p.dxGatewayId)),
+        };
+      }
+    }
     const locationCount = new Set(
       scope.connections.map((c) => c.location).filter(Boolean) as string[],
     ).size || new Set(scope.virtualInterfaces.map((v) => v.location).filter(Boolean) as string[]).size;
@@ -617,7 +679,8 @@ export function analyzeTopology(
       hasVif,
       hasAssociation,
       recommendations: recs,
-      focusRecommendations: focusRecs,
+      focusRecommendations: focusWithPeerGaps,
+      ...(siteRedundancyVia ? { siteRedundancyVia } : {}),
     });
   }
 

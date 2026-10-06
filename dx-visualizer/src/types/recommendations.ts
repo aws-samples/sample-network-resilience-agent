@@ -57,6 +57,20 @@ export interface DxGatewayAssessment {
    * equal `recommendations` (raw target === effective target).
    */
   focusRecommendations?: Recommendation[];
+  /**
+   * Set when this gateway sits at one DX location on its own, but shares a
+   * downstream (TGW / VGW / core network / terminal VPC) with other gateways
+   * that reach it from other locations — so the engine suppresses the
+   * "add a second location" rec and draws no ghost for it. The card names the
+   * peers so its per-gateway tier doesn't contradict the empty canvas.
+   * `currentLevel` is still this gateway's own posture.
+   */
+  siteRedundancyVia?: {
+    /** Other gateways in the group that bring a DX location this one lacks. */
+    peers: { dxGatewayId: string; dxGatewayName: string; locations: string[] }[];
+    /** What is shared: named TGW/VGW/core network, or a VPC reached two ways. */
+    sharedDownstream: string[];
+  };
 }
 
 export interface GlobalAssessment {
