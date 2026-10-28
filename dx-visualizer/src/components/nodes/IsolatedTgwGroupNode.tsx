@@ -4,6 +4,7 @@ import type { DxNodeData, TgwChildInfo } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
 import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
+import { useRecPathMuted } from './useRecPathMuted';
 import { useRedact } from '../../utils/redact';
 import { TransitGatewayIcon } from './aws-icons';
 
@@ -19,7 +20,8 @@ export function IsolatedTgwGroupNode({ data, id }: NodeProps) {
   const highlightedNodeIds = useTopologyStore((s) => s.highlightedNodeIds);
   const hasHoverActive = hoveredNodeId != null;
   const isOnHoverPath = hasHoverActive && highlightedNodeIds.has(id);
-  const isDimmed = hasHoverActive && !isOnHoverPath;
+  const isRecPathMuted = useRecPathMuted(id);
+  const isDimmed = (hasHoverActive && !isOnHoverPath) || isRecPathMuted;
 
   const details = d.details as Record<string, string> | undefined;
   const groupKey = details?.groupKey ?? id.replace(/^isolatedtgwgroup-/, '');

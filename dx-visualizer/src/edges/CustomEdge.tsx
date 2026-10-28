@@ -4,7 +4,7 @@ import type { EdgeProps } from '@xyflow/react';
 import { COLORS } from '../utils/colors';
 import { PEERING_INTRA_OFFSET, PEERING_CROSS_CLEARANCE, dimOpacityFor } from '../utils/constants';
 import { parseBandwidthToBps, formatBps } from '../utils/shared';
-import { useTopologyStore } from '../store/topology-store';
+import { useTopologyStore, isRecPathActive } from '../store/topology-store';
 import { useRedact } from '../utils/redact';
 import { VifRoutePanel } from '../components/nodes/VifRoutePanel';
 import { TagMarker } from '../components/nodes/TagMarker';
@@ -97,7 +97,11 @@ export function CustomEdge({
   const isTagMatch = useTopologyStore(
     (s) => s.tagFilters.length > 0 && edgeMatchesTag(data, s.tagMatchIds),
   );
-  const isRouteDiffMuted = isRouteDiffScoped && !isRouteDiffPicked;
+  // A clicked tier option's recommended path: its ghost edges march, everything
+  // else steps back as for a route-diff pick.
+  const isRecPathLit = useTopologyStore((s) => isRecPathActive(s) && s.recPathEdgeIds.has(id));
+  const isRecPathMuted = useTopologyStore((s) => isRecPathActive(s) && !s.recPathEdgeIds.has(id));
+  const isRouteDiffMuted = (isRouteDiffScoped && !isRouteDiffPicked) || isRecPathMuted;
   // Calendar spotlight and route-diff pick are the same visual affordance — "this
   // is the edge that was just named" — so they render identically from here on.
   const isGlowLit = isSpotlit || isRouteDiffPicked;
@@ -573,7 +577,7 @@ export function CustomEdge({
           // No width bump for a route-diff pick: the spotlight march above is the
           // whole signal, exactly as it is for a calendar spotlight, and thickening
           // the stroke underneath it made the two look different again.
-          strokeWidth: isHiddenEdge ? 1.5 : isEdgeHighlighted || isGlowLit ? 3.5 : isFailed ? 3 : light ? 2.5 : 2,
+          strokeWidth: isHiddenEdge ? 1.5 : isEdgeHighlighted || isGlowLit || isRecPathLit ? 3.5 : isFailed ? 3 : light ? 2.5 : 2,
           strokeDasharray: isHiddenEdge ? '4 4' : isFailed ? '6 3' : isRecommended ? '8 4' : undefined,
           // A picked edge stays fully opaque even while a hover dims the rest —
           // the point is to keep the compared VIFs legible against the fade — and
@@ -581,7 +585,7 @@ export function CustomEdge({
           // not from the halo alone.
           opacity: isHiddenEdge
             ? 0.25
-            : isRouteDiffPicked
+            : isRouteDiffPicked || isRecPathLit
               ? 1
               : isEdgeDimmed
                 ? dimOpacityFor('edge', light)

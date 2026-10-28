@@ -1,6 +1,6 @@
 import type { TopologyData, DxNode, DxEdge } from '../types/topology';
 import type { Recommendation, ResiliencyLevel } from '../types/recommendations';
-import { getLocationDeviceCounts, getUsedLocations, getSinkConnectedDevices, lagMemberCount, type SinkDeviceInfo } from './sla-gating';
+import { getLocationDeviceCounts, getLocationLinkCounts, getUsedLocations, getSinkConnectedDevices, lagMemberCount, meetsMaximumTier, maximumTierGapLocations, type SinkDeviceInfo } from './sla-gating';
 import { makeGhostNode, makeGhostEdge } from './ghost-helpers';
 import { secondLocationGhostChain, extraDeviceGhost, lagDeviceGhost, ghostSinkEdges, ghostLagEdges, type GhostSink } from './ghost-chains';
 
@@ -120,6 +120,11 @@ export function ruleSingleConnectionPerLocation(
   // Which gateway this scope targets — fans ghost devices into `vgw-<id>` vs
   // `dxgw-<id>`. DX-side device redundancy is otherwise identical.
   gatewayKind: GatewayKind = 'dxgw',
+  // The exact locations to draw a device-gap ghost at, decided by the caller
+  // over a WIDER scope than this one — a Transit Gateway grades the union of its
+  // feeders, so which sites still need a second device is a property of that
+  // union, while the ghost must still fan into one feeder's own gateway.
+  forceLocations?: ReadonlySet<string>,
 ): Recommendation[] {
   // High-tier topologies only need 1 connection per location — this rule
   // is about closing the device-failure gap, which only matters for Maximum.
@@ -128,11 +133,14 @@ export function ruleSingleConnectionPerLocation(
   const recs: Recommendation[] = [];
   const locationDevices = getLocationDeviceCounts(topology);
 
-  // Max tier requires 2+ conns on separate devices at EVERY location, including
-  // the existing one. For a single-location DXGW targeting Max, the user needs
-  // both: (a) a second location (covered by ruleSingleDxLocation) and
-  // (b) a second device at the existing location (this rule). Don't gate on
-  // multi-location scope — both recs need to fire in parallel for the tier goal.
+  // Max tier needs TWO device-redundant locations (the SLA), not every location —
+  // so only the fewest locations that close that gap get a second-device rec.
+  // For a single-location DXGW targeting Max the user still needs both: (a) a
+  // second location with two devices (ruleSingleDxLocation) and (b) a second
+  // device at the existing location (this rule).
+  const gapLocations = forceLocations
+    ? new Set(forceLocations)
+    : new Set(maximumTierGapLocations(locationDevices, skipLocations));
 
   const resolvedDxgwId = dxGatewayId ?? (gatewayKind === 'dxgw' ? topology.dxGateways[0]?.directConnectGatewayId : undefined);
   const prefix = resolvedDxgwId ? `rec-${resolvedDxgwId}` : 'rec';
@@ -142,10 +150,8 @@ export function ruleSingleConnectionPerLocation(
   if (dxgwNodeId) sinks.push({ nodeId: dxgwNodeId, label: 'VIF' });
   if (carriesPublicVif) sinks.push(PUB_SINK);
 
-  for (const [location, deviceCount] of locationDevices) {
-    if (deviceCount >= 2) continue;
-    // Already device-redundant for the converged downstream at this location.
-    if (skipLocations?.has(location)) continue;
+  for (const [location] of locationDevices) {
+    if (!gapLocations.has(location)) continue;
 
     const locNode = topology.locations.find((l) => l.locationCode === location);
     const locName = locNode?.locationName ?? location;
@@ -219,6 +225,96 @@ export function ruleSingleVgw(topology: TopologyData): Recommendation | null {
   };
 }
 
+/**
+ * Transit Gateway resiliency rules.
+ *
+ * `scope` is the union of every transit VIF reaching ONE TGW, across all the DX
+ * gateways associated to it (built by the engine). That union is the unit that
+ * matters for a transit VIF: the DX gateway is only a hop, and the TGW stays
+ * reachable as long as any one of those paths does. So these rules ask whether
+ * the TGW survives, which per-gateway rules cannot — two gateways at different
+ * sites are each single-location, yet together they make the TGW site-redundant.
+ *
+ * Text-only by design: no ghost nodes. The fix for each gap is drawn by the
+ * feeding gateways' own `single-dx-location` / `single-connection-per-location`
+ * recommendations, which already account for a sibling sharing this TGW.
+ *
+ * The text names no TGW: TGWs fed by the same gateways share one card, and the
+ * card or report heading supplies the name.
+ *
+ * The three are mutually exclusive on the facts they state: one VIF is reported
+ * as such (not also as one location), and a device gap is only reported once
+ * there are two VIFs to put on separate devices.
+ */
+export function ruleTgwResiliency(
+  scope: TopologyData,
+  target: ResiliencyTarget,
+  tgwId: string,
+): Recommendation[] {
+  const vifCount = scope.virtualInterfaces.length;
+  if (vifCount === 0) return [];
+
+  const locationName = (code: string) =>
+    scope.locations.find((l) => l.locationCode === code)?.locationName || code;
+  const tierLabel = target === 'maximum' ? 'Maximum Resiliency' : 'High Resiliency';
+
+  if (vifCount === 1) {
+    const vif = scope.virtualInterfaces[0];
+    const vifName = vif.virtualInterfaceName || vif.virtualInterfaceId;
+    return [{
+      id: `rec-tgw-single-transit-vif-${tgwId}`,
+      ruleId: 'tgw-single-transit-vif',
+      severity: 'info',
+      category: 'resiliency',
+      title: 'Only one transit VIF reaches this Transit Gateway',
+      description: `${vifName} is the only transit VIF reaching this Transit Gateway, so a single connection, device or location failure cuts the Transit Gateway off from on-premises. Add a transit VIF from a second Direct Connect location to reach ${tierLabel}.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    }];
+  }
+
+  const recs: Recommendation[] = [];
+  const links = getLocationLinkCounts(scope);
+
+  if (links.size === 1) {
+    const [only] = [...links.keys()];
+    recs.push({
+      id: `rec-tgw-single-dx-location-${tgwId}`,
+      ruleId: 'tgw-single-dx-location',
+      severity: 'info',
+      category: 'resiliency',
+      title: 'All transit VIFs reaching this Transit Gateway land at one location',
+      description: `All ${vifCount} transit VIFs reaching this Transit Gateway land at ${locationName(only)}, so a site failure cuts the Transit Gateway off from on-premises. Add a transit VIF from a second Direct Connect location to reach ${tierLabel}.`,
+      additionalNodes: [],
+      additionalEdges: [],
+    });
+  }
+
+  // Device redundancy only gates Maximum, and only at the fewest locations that
+  // reach two device-redundant ones — the same line `ruleSingleConnectionPerLocation` draws.
+  if (target === 'maximum') {
+    const gaps = new Set(maximumTierGapLocations(new Map([...links].map(([loc, c]) => [loc, c.devices] as const))));
+    for (const [loc, counts] of links) {
+      if (!gaps.has(loc)) continue;
+      const linkText = counts.connections > 1
+        ? `its ${counts.connections} connections at ${locationName(loc)} terminate on one AWS logical device`
+        : `it has one connection at ${locationName(loc)}`;
+      recs.push({
+        id: `rec-tgw-single-device-${loc}-${tgwId}`,
+        ruleId: 'tgw-single-device-per-location',
+        severity: 'info',
+        category: 'resiliency',
+        title: `One AWS device at ${locationName(loc)} on the transit path`,
+        description: `On the transit path into this Transit Gateway, ${linkText}, so a device failure or maintenance there removes that location. Add a connection on a separate device at ${locationName(loc)} to reach Maximum Resiliency.`,
+        additionalNodes: [],
+        additionalEdges: [],
+      });
+    }
+  }
+
+  return recs;
+}
+
 
 /**
  * LAG resiliency rule — recommends adding LAGs and/or DX locations to reach
@@ -284,10 +380,8 @@ export function ruleLagResiliency(
   const largestLagAt = (loc: string): number => lagCountsByLocation.get(loc)?.[0] ?? 0;
 
   const locationCount = lagsByLocation.size;
-  const allLocationsHaveMultipleLags = locationCount > 0 && [...lagsByLocation.values()].every((c) => c >= 2);
-
-  // 2+ locations with 2+ LAGs each = Maximum already met.
-  if (locationCount >= 2 && allLocationsHaveMultipleLags) return recs;
+  // Two locations with 2+ LAGs each = Maximum already met (the SLA bar).
+  if (meetsMaximumTier(lagsByLocation.values())) return recs;
 
   const sinkDevices = getSinkConnectedDevices(topology);
 
@@ -346,10 +440,8 @@ export function ruleLagResiliency(
   // at 2+ sink devices are skipped.
   if (sinkDevices.size >= 2 && locationCount < 2) {
     if (target === 'maximum') {
-      for (const [location, info] of sinkDevices) {
-        if (info.deviceCount >= 2) continue;
-        recs.push(makeRedundantDeviceRec(location));
-      }
+      const perLocation = new Map([...sinkDevices].map(([loc, info]) => [loc, info.deviceCount] as const));
+      for (const location of maximumTierGapLocations(perLocation)) recs.push(makeRedundantDeviceRec(location));
     }
     return recs;
   }
@@ -437,12 +529,10 @@ export function ruleLagResiliency(
     });
   }
 
-  // Rule 2: 2+ locations but some have <2 LAGs → recommend second LAG per location.
+  // Rule 2: 2+ locations but short of two with 2+ LAGs → a second LAG at the
+  // fewest locations that close the gap.
   if (target === 'maximum' && locationCount >= 2) {
-    for (const [location, lagCount] of lagsByLocation) {
-      if (lagCount >= 2) continue;
-      recs.push(makeRedundantDeviceRec(location));
-    }
+    for (const location of maximumTierGapLocations(lagsByLocation)) recs.push(makeRedundantDeviceRec(location));
   }
 
   return recs;

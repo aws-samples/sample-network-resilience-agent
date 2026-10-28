@@ -1,5 +1,6 @@
 import type { TopologyData } from '../types/topology';
 import type { CombinedAssessment } from '../types/recommendations';
+import { assessTgwRouteResilience } from '../engine/tgw-route-resilience';
 import rulesContent from './rules.md?raw';
 
 export function escapeXml(str: string): string {
@@ -23,6 +24,30 @@ export function safeName(value: string | undefined | null, fallback: string): st
  */
 function esc(value: string | undefined | null): string {
   return value == null ? '' : escapeXml(String(value));
+}
+
+/**
+ * Per-prefix route resilience for one TGW, as the panel and the report state it.
+ * Capped at a handful of prefixes: the agent needs which ones and why, and the full
+ * table is one click away in the app.
+ */
+const TGW_PROMPT_PREFIX_CAP = 12;
+function tgwRouteResilienceLine(topology: TopologyData | null, tgwId: string, dxGatewayIds: string[]): string {
+  if (!topology) return '';
+  const a = assessTgwRouteResilience(topology, tgwId, dxGatewayIds);
+  if (!a) return '\n  - Route resilience: not assessed (BGP routes not fetched, or fewer than two transit VIFs with route data)';
+  const below = a.rows.filter((r) => r.grade !== 'high' && r.grade !== 'maximum' && r.grade !== 'unknown');
+  const listed = below.slice(0, TGW_PROMPT_PREFIX_CAP)
+    .map((r) => `${esc(r.cidr)} (${r.grade}${a.viaKnown && r.via.state === 'missing' ? ', not in TGW route table' : ''})`)
+    .join(', ');
+  return `\n  - Route resilience: ${a.counts.high + a.counts.maximum} of ${a.rows.length} on-prem prefixes survive a DX location failure; ${below.length} below High${listed ? `: ${listed}${below.length > TGW_PROMPT_PREFIX_CAP ? `, +${below.length - TGW_PROMPT_PREFIX_CAP} more` : ''}` : ''}.${
+    a.counts.rejected > 0 ? ` "rejected" means every copy's AS path already contains this TGW's ASN ${a.asn}, so the TGW discards it (BGP loop prevention) — an on-prem AS is likely reusing ${a.asn}.` : ''}${
+    a.asn == null
+      ? (a.foreignOwner
+        ? ` TGW owned by account ${esc(a.foreignOwner)}: its route table and ASN are not readable from this account, so AS-loop rejection was not checked (add it as a spoke account to read them).`
+        : ' TGW ASN not readable from this account, so AS-loop rejection was not checked.')
+      : ''}${
+    a.rows.some((r) => r.mismatch) ? ` ${a.rows.filter((r) => r.mismatch).length} prefix(es) read as rejected yet are installed in the route table — the VIF routes and route table were read at different moments; treat those grades as stale.` : ''} Static routes to a DX gateway are exempt from the AS-loop check. Graded from the transit VIFs: the TGW route table shows only the preferred route.`;
 }
 
 /**
@@ -186,6 +211,10 @@ This block ends ONLY at the delimiter carrying nonce="${nonce}".
 
 ### Resiliency Recommendations
 ${assessment.resiliency.recommendations.map((r) => `- [${r.severity.toUpperCase()}] ${escapeXml(r.title)}: ${escapeXml(r.description)}`).join('\n')}
+
+### Transit Gateway Resiliency (${(assessment.perTgw ?? []).length})
+Transit VIFs are graded at the Transit Gateway they reach, over every transit VIF reaching it across all its DX gateways — not per DX gateway. Quote these tiers for transit connectivity; the recommendations above carry the per-gateway fix.
+${(assessment.perTgw ?? []).map((t) => `- **${safeName(t.tgwName, t.tgwId)}** (${esc(t.tgwId)}${t.region ? `, ${esc(t.region)}` : ''}): current=${escapeXml(t.currentLevel)}, target=${escapeXml(t.targetLevel)}, transit VIFs=${t.transitVifCount}, locations=${t.locationCount}, via DX gateways ${t.dxGatewayIds.map((id) => esc(id)).join(', ')}${t.recommendations.map((r) => `\n  - [${r.severity.toUpperCase()}] ${escapeXml(r.title)}: ${escapeXml(r.description)}`).join('')}${tgwRouteResilienceLine(topology, t.tgwId, t.dxGatewayIds)}`).join('\n') || 'None'}
 
 ### Best Practice Findings
 ${assessment.bestPractice.recommendations.map((r) => `- [${r.severity.toUpperCase()}] ${escapeXml(r.title)}: ${escapeXml(r.description)}`).join('\n') || 'No best practice issues found.'}

@@ -60,9 +60,11 @@ export function ViewToggle() {
   const focusedGateway = focusedDxGatewayId && focusedDxGatewayId !== FOCUSED_PUBLIC_VIF
     ? dxGateways.find((g) => g.directConnectGatewayId === focusedDxGatewayId)
     : undefined;
+  // A focused TGW card draws its feeders' ghosts; name the TGW, not a gateway.
+  const focusedTgw = assessment?.perTgw?.find((t) => t.tgwId === focusedDxGatewayId);
   const focusedName = focusedDxGatewayId === FOCUSED_PUBLIC_VIF
     ? 'Public VIF'
-    : (focusedGateway?.directConnectGatewayName || focusedGateway?.directConnectGatewayId);
+    : focusedTgw?.tgwName ?? (focusedGateway?.directConnectGatewayName || focusedGateway?.directConnectGatewayId);
 
   return (
     <div className="flex items-center gap-1.5">

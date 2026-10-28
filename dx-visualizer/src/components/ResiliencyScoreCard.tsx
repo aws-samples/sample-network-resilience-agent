@@ -5,11 +5,11 @@ import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useExportReport } from '../hooks/useExportReport';
 import { FullExportConfirmModal } from './FullExportConfirmModal';
 import { COLORS } from '../utils/colors';
-import type { Recommendation, DxGatewayAssessment, VgwAssessment, PublicVifAssessment } from '../types/recommendations';
+import type { Recommendation, DxGatewayAssessment, VgwAssessment, TgwAssessment, PublicVifAssessment } from '../types/recommendations';
 import type { TopologyData } from '../types/topology';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
-import { FOCUSED_PUBLIC_VIF, buildPublicVifScope } from '../engine/recommendation-engine';
-import { getLocationDeviceCounts } from '../engine/sla-gating';
+import { FOCUSED_PUBLIC_VIF, buildPublicVifScope, groupTgwsByFeeders } from '../engine/recommendation-engine';
+import { getLocationDeviceCounts, meetsMaximumTier, maximumTierGapLocations } from '../engine/sla-gating';
 import { metaFor } from '../engine/rule-metadata';
 
 const tierColors: Record<string, string> = {
@@ -92,6 +92,10 @@ function buildChecklist(
   const locCount = locationConns.size;
   const allHaveMultiple = locCount > 0 && [...locationConns.values()].every((c) => c >= 2);
   const underprovisioned = [...locationConns.entries()].filter(([, c]) => c < 2).map(([loc]) => loc);
+  // Maximum is two device-redundant locations (the SLA), so only these
+  // single-device locations stand between this scope and Maximum.
+  const maxMet = meetsMaximumTier(locationConns.values());
+  const gapLocations = maximumTierGapLocations(locationConns);
 
   // Labels use consistent noun-based phrasing ("X redundancy") so pass and
   // fail rows scan the same way down the column — the row color and checkmark
@@ -153,10 +157,16 @@ function buildChecklist(
     });
   } else {
     for (const loc of underprovisioned) {
+      // A single-device location past the two Maximum needs is a statement, not
+      // a gap: grey (info), and excluded from the unmet count.
+      const needed = gapLocations.includes(loc);
       coverageChecklist.push({
         label: `Device redundancy at ${loc}`,
         met: false,
-        detail: 'Connections at this location share a single AWS logical device — a device outage cuts the location entirely',
+        ...(needed ? {} : { severity: 'info' as const }),
+        detail: needed
+          ? 'Connections at this location share a single AWS logical device — a device outage cuts the location entirely'
+          : 'One AWS logical device here. Not required for Maximum: two other locations are already device-redundant.',
       });
     }
     const protectedLocs = [...locationConns.entries()].filter(([, c]) => c >= 2).map(([loc]) => loc);
@@ -176,7 +186,7 @@ function buildChecklist(
   // which we surface as 'devtest' here.
   const currentLevel = locCount === 0
     ? 'none'
-    : locCount >= 2 && allHaveMultiple
+    : maxMet
       ? 'maximum'
       : locCount >= 2
         ? 'high'
@@ -198,16 +208,21 @@ function buildChecklist(
       level: 'high',
       step: 'Add a connection at a second location',
     });
+    // Maximum is two locations with two devices each, so a single-device site
+    // needs its own second device too — the ghost draws it, and the step must
+    // say so or it promises Maximum for half the work.
     options.push({
       level: 'maximum',
-      step: 'Add a second location with 2 connections',
+      step: gapLocations.length > 0
+        ? `Add a second location with 2 connections, and a connection on a separate AWS logical device at ${gapLocations[0]}`
+        : 'Add a second location with 2 connections',
     });
   } else if (currentLevel === 'high') {
-    const list = underprovisioned.length === 1
-      ? underprovisioned[0]
-      : underprovisioned.length === 2
-        ? underprovisioned.join(' and ')
-        : `${underprovisioned.slice(0, -1).join(', ')}, and ${underprovisioned[underprovisioned.length - 1]}`;
+    const list = gapLocations.length === 1
+      ? gapLocations[0]
+      : gapLocations.length === 2
+        ? gapLocations.join(' and ')
+        : `${gapLocations.slice(0, -1).join(', ')}, and ${gapLocations[gapLocations.length - 1]}`;
     options.push({
       level: 'maximum',
       step: `Add a connection on a separate AWS logical device at ${list}`,
@@ -994,13 +1009,12 @@ function PublicVifSection({
   const currentTarget = useTopologyStore((s) => s.resiliencyTargets[FOCUSED_PUBLIC_VIF]);
 
   const isFocused = focusedDxGatewayId === FOCUSED_PUBLIC_VIF && viewMode === 'recommended';
-  // Highlight the active option whenever this row's ghosts are actually drawn on
-  // the canvas — i.e. in Recommended view when this row is focused OR nothing is
-  // focused (view-all renders every row's recommendation). A different row being
-  // focused hides this row's ghosts, so it must not highlight.
+  // An option reads as selected only once it has been clicked — this row focused in
+  // Recommended view. It used to light in view-all too, so every card showed a
+  // "selected" option nobody had picked, and a click changed nothing visible.
   const isRenderedOnCanvas =
     viewMode === 'recommended' &&
-    (focusedDxGatewayId === FOCUSED_PUBLIC_VIF || focusedDxGatewayId === null);
+    focusedDxGatewayId === FOCUSED_PUBLIC_VIF;
   const activeOptionLevel: ResiliencyTarget | null = isRenderedOnCanvas
     ? (currentTarget ?? (pubVif.targetLevel === 'maximum' ? 'maximum' : 'high'))
     : null;
@@ -1157,13 +1171,12 @@ function DxGatewaySection({
   const setSpotlightNode = useTopologyStore((s) => s.setSpotlightNode);
   const hoveredNodeId = useTopologyStore((s) => s.hoveredNodeId);
   const isFocused = focusedDxGatewayId === gateway.dxGatewayId && viewMode === 'recommended';
-  // Highlight the active option whenever this row's ghosts are actually drawn on
-  // the canvas — i.e. in Recommended view when this row is focused OR nothing is
-  // focused (view-all renders every row's recommendation). A different row being
-  // focused hides this row's ghosts, so it must not highlight.
+  // An option reads as selected only once it has been clicked — this row focused in
+  // Recommended view. It used to light in view-all too, so every card showed a
+  // "selected" option nobody had picked, and a click changed nothing visible.
   const isRenderedOnCanvas =
     viewMode === 'recommended' &&
-    (focusedDxGatewayId === gateway.dxGatewayId || focusedDxGatewayId === null);
+    focusedDxGatewayId === gateway.dxGatewayId;
   const activeOptionLevel: ResiliencyTarget | null = isRenderedOnCanvas
     ? (currentTarget ?? (gateway.targetLevel === 'maximum' ? 'maximum' : 'high'))
     : null;
@@ -1411,7 +1424,7 @@ function VgwSection({
   const isFocused = focusedDxGatewayId === vgw.vgwId && viewMode === 'recommended';
   const isRenderedOnCanvas =
     viewMode === 'recommended' &&
-    (focusedDxGatewayId === vgw.vgwId || focusedDxGatewayId === null);
+    focusedDxGatewayId === vgw.vgwId;
   const activeOptionLevel: ResiliencyTarget | null = isRenderedOnCanvas
     ? (currentTarget ?? (vgw.targetLevel === 'maximum' ? 'maximum' : 'high'))
     : null;
@@ -1525,6 +1538,201 @@ function VgwSection({
   );
 }
 
+/**
+ * The DX path into a TGW: every VIF on the gateways feeding it, as one scope, so
+ * the tier options are computed over the same union the TGW is graded on.
+ */
+function buildTgwScopedTopology(topology: TopologyData, dxGatewayIds: string[]): TopologyData {
+  const feeders = new Set(dxGatewayIds);
+  const scopedVifs = topology.virtualInterfaces.filter(
+    (v) => v.directConnectGatewayId != null && feeders.has(v.directConnectGatewayId),
+  );
+  const scopedConnIds = new Set(scopedVifs.map((v) => v.connectionId).filter(Boolean) as string[]);
+  const scopedConns = topology.connections.filter((c) => scopedConnIds.has(c.connectionId));
+  const scopedLocationCodes = new Set<string>();
+  for (const c of scopedConns) if (c.location) scopedLocationCodes.add(c.location);
+  for (const v of scopedVifs) if (v.location) scopedLocationCodes.add(v.location);
+  return {
+    ...topology,
+    connections: scopedConns,
+    virtualInterfaces: scopedVifs,
+    locations: topology.locations.filter((l) => scopedLocationCodes.has(l.locationCode)),
+  };
+}
+
+/**
+ * Per-TGW resilience card — the only card a DX gateway that connects to a TGW
+ * gets. Its gateways have no card of their own, so this one carries their tier
+ * options: picking High or Maximum sets that target on every gateway feeding the
+ * TGW and focuses the TGW, which draws all of their ghost paths together.
+ */
+function TgwSection({
+  tgws,
+  topology,
+  light,
+  inFullscreen,
+}: {
+  tgws: TgwAssessment[];
+  topology: TopologyData;
+  light: boolean;
+  inFullscreen: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  const setSpotlightNode = useTopologyStore((s) => s.setSpotlightNode);
+  const setResiliencyTarget = useTopologyStore((s) => s.setResiliencyTarget);
+  const setViewMode = useTopologyStore((s) => s.setViewMode);
+  const setFocusedDxGatewayId = useTopologyStore((s) => s.setFocusedDxGatewayId);
+  const focusedDxGatewayId = useTopologyStore((s) => s.focusedDxGatewayId);
+  const viewMode = useTopologyStore((s) => s.viewMode);
+  const lead = tgws[0];
+  const feederTarget = useTopologyStore((s) => s.resiliencyTargets[lead.dxGatewayIds[0] ?? '']);
+  const perDxGateway = useTopologyStore((s) => s.assessment?.perDxGateway ?? []);
+  const levelColor = tierColors[lead.currentLevel] ?? '#6b7280';
+  const names = tgws.map((t) => t.tgwName).join(', ');
+  const feeders = lead.dxGatewayIds
+    .map((id) => topology.dxGateways.find((g) => g.directConnectGatewayId === id)?.directConnectGatewayName || id)
+    .join(', ');
+
+  // Tier options over the union of the feeders, from their own resiliency recs —
+  // the ones that draw the ghosts.
+  const scoped = buildTgwScopedTopology(topology, lead.dxGatewayIds);
+  const feederRecs = perDxGateway
+    .filter((g) => lead.dxGatewayIds.includes(g.dxGatewayId))
+    .flatMap((g) => g.recommendations);
+  const { tierProgression } = buildChecklist(scoped, feederRecs, light);
+
+  // Focus is keyed by the lead TGW: TGWs sharing a card share their feeders, so
+  // any member draws the same ghosts.
+  const isFocused = tgws.some((t) => t.tgwId === focusedDxGatewayId) && viewMode === 'recommended';
+  // Selected only once clicked (this card focused), as on the gateway cards.
+  const isRenderedOnCanvas = isFocused;
+  const activeOptionLevel: ResiliencyTarget | null = isRenderedOnCanvas
+    ? (feederTarget ?? (lead.targetLevel === 'maximum' ? 'maximum' : 'high'))
+    : null;
+  const handleSelectOption = (level: ResiliencyTarget) => {
+    if (isFocused && activeOptionLevel === level) {
+      setFocusedDxGatewayId(null);
+      return;
+    }
+    for (const id of lead.dxGatewayIds) setResiliencyTarget(id, level);
+    setFocusedDxGatewayId(lead.tgwId);
+    setViewMode('recommended');
+  };
+
+  const recFor = (ruleId: string) => lead.recommendations.filter((r) => r.ruleId === ruleId);
+  const deviceGaps = recFor('tgw-single-device-per-location');
+  const checks: ChecklistItem[] = [
+    {
+      label: 'Reached by two or more transit VIFs',
+      met: lead.transitVifCount >= 2,
+      detail: recFor('tgw-single-transit-vif')[0]?.description,
+      severity: 'info',
+    },
+    {
+      label: 'Transit VIFs from two or more Direct Connect locations',
+      met: lead.locationCount >= 2,
+      detail: recFor('tgw-single-dx-location')[0]?.description,
+      severity: 'info',
+    },
+    {
+      label: 'Two or more AWS devices at two or more locations',
+      met: lead.currentLevel === 'maximum',
+      detail: deviceGaps.length > 0 ? deviceGaps.map((r) => r.description).join(' ') : undefined,
+      severity: 'info',
+    },
+  ];
+  const toggleOpenIfNotSelecting = () => {
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().length > 0) return;
+    setOpen((v) => !v);
+  };
+
+  return (
+    <div
+      className={`${inFullscreen ? 'px-5 pt-4 pb-4' : 'px-4 pt-3 pb-3'} border-t ${light ? 'border-gray-200' : 'border-slate-700'}`}
+      // Canvas node id follows `tgw-${transitGatewayId}` (see topology-builder).
+      onMouseEnter={() => setSpotlightNode(`tgw-${lead.tgwId}`)}
+      onMouseLeave={() => setSpotlightNode(null)}
+    >
+      <div className="flex items-center justify-between gap-2 mb-2.5">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={toggleOpenIfNotSelecting}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setOpen((v) => !v);
+            }
+          }}
+          aria-expanded={open}
+          aria-label={`${open ? 'Collapse' : 'Expand'} ${names} details`}
+          className="min-w-0 flex-1 text-left cursor-pointer"
+        >
+          <div className={`text-sm font-bold truncate select-text ${light ? 'text-gray-800' : 'text-slate-100'}`}>
+            {names}
+          </div>
+          <div className={`text-[10px] font-mono truncate select-text ${light ? 'text-gray-500' : 'text-slate-400'}`}>
+            Transit Gateway · {tgws.map((t) => t.tgwId).join(', ')}
+            {lead.region ? ` · ${lead.region}` : ''}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span
+            className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full"
+            style={{ color: levelColor, backgroundColor: `${levelColor}1a`, border: `1px solid ${levelColor}40` }}
+            title={tierLabels[lead.currentLevel]}
+          >
+            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: levelColor }} aria-hidden="true" />
+            {tierShortLabels[lead.currentLevel]}
+          </span>
+          {tierSla[lead.currentLevel] && (
+            <span className={`text-[11px] font-semibold tabular-nums ${light ? 'text-gray-700' : 'text-slate-200'}`}>
+              {tierSla[lead.currentLevel]}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-label={`${open ? 'Collapse' : 'Expand'} ${names} details`}
+            className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/5"
+          >
+            <svg
+              className={`w-3.5 h-3.5 ${light ? 'text-gray-500' : 'text-slate-400'}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true"
+            >
+              <path strokeLinecap="round" d="M6 12h12" />
+              {!open && <path strokeLinecap="round" d="M12 6v12" />}
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <>
+          <p className={`text-xs mb-2.5 leading-relaxed ${light ? 'text-gray-600' : 'text-slate-400'}`}>
+            {lead.transitVifCount} transit VIF{lead.transitVifCount === 1 ? '' : 's'} across{' '}
+            {lead.locationCount} location{lead.locationCount === 1 ? '' : 's'} through {feeders}.
+          </p>
+          {tierProgression && viewMode === 'recommended' && (
+            <div className="mb-3">
+              <TierProgressionStrip
+                progression={tierProgression}
+                light={light}
+                onSelectOption={handleSelectOption}
+                activeOptionLevel={activeOptionLevel}
+                hideCurrentTier
+              />
+            </div>
+          )}
+          {viewMode === 'current' && <ProtectionCoverage items={checks} light={light} hideHeader />}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ResiliencyScoreCard() {
   const assessment = useTopologyStore((s) => s.assessment);
   const light = useIsLight();
@@ -1563,6 +1771,11 @@ export function ResiliencyScoreCard() {
     const by = dxgwYPosition.get(`dxgw-${b.dxGatewayId}`) ?? Number.POSITIVE_INFINITY;
     return ay - by;
   });
+  // A DX gateway that connects to a TGW is graded only on the TGW card, so it
+  // gets no card of its own; one that connects to a VGW (or nothing yet) keeps
+  // its card. Best-practice findings still come from every gateway below.
+  const cardDxGateways = orderedDxGateways.filter((g) => !g.assessedAtTgwIds);
+  const tgwGroups = groupTgwsByFeeders(assessment.perTgw);
 
   // The export fetches BGP routes and CloudWatch utilization for the report when
   // they aren't already loaded, so it is no longer instant — without a pending
@@ -1669,10 +1882,19 @@ export function ResiliencyScoreCard() {
   // in Current State to keep the count aligned with what's visible.
   const unmetCount = (() => {
     let count = 0;
-    if (topology && orderedDxGateways.length > 0) {
-      for (const g of orderedDxGateways) {
+    if (topology && (cardDxGateways.length > 0 || tgwGroups.length > 0)) {
+      for (const g of cardDxGateways) {
         const scoped = buildScopedTopology(topology, g.dxGatewayId);
         const { coverageChecklist } = buildChecklist(scoped, g.recommendations, light);
+        count += coverageChecklist.filter((i) => !i.met && i.severity !== 'info').length;
+      }
+      // Transit gateways have no card, so their gaps count once per TGW card,
+      // over the same union scope that card grades.
+      for (const [lead] of tgwGroups) {
+        const recs = assessment.perDxGateway
+          .filter((g) => lead.dxGatewayIds.includes(g.dxGatewayId))
+          .flatMap((g) => g.recommendations);
+        const { coverageChecklist } = buildChecklist(buildTgwScopedTopology(topology, lead.dxGatewayIds), recs, light);
         count += coverageChecklist.filter((i) => !i.met && i.severity !== 'info').length;
       }
     } else {
@@ -1684,7 +1906,7 @@ export function ResiliencyScoreCard() {
     return count;
   })();
 
-  const hasPerDxgw = orderedDxGateways.length > 0 && !!topology;
+  const hasPerDxgw = (cardDxGateways.length > 0 || tgwGroups.length > 0) && !!topology;
 
   const content = (inFullscreen: boolean) => (
     <>
@@ -1695,7 +1917,7 @@ export function ResiliencyScoreCard() {
           gateway always carries its own header instead of a bare SLA-tier strip. */}
       {hasPerDxgw ? (
         <section aria-label="Direct Connect Gateways">
-          {orderedDxGateways.map((gw) => (
+          {cardDxGateways.map((gw) => (
             <DxGatewaySection
               key={gw.dxGatewayId}
               gateway={gw}
@@ -1725,6 +1947,23 @@ export function ResiliencyScoreCard() {
             <ProtectionCoverage items={globalChecklist.coverageChecklist} light={light} />
           </div>
         </>
+      )}
+
+      {/* Per-TGW cards — the only home for a DX gateway that connects to a TGW:
+          graded over every transit VIF reaching the TGW, with the tier options
+          that draw those gateways' ghost paths. */}
+      {topology && assessment.perTgw.length > 0 && (
+        <section aria-label="Transit Gateways">
+          {tgwGroups.map((tgws) => (
+            <TgwSection
+              key={tgws[0].tgwId}
+              tgws={tgws}
+              topology={topology}
+              light={light}
+              inFullscreen={inFullscreen}
+            />
+          ))}
+        </section>
       )}
 
       {/* Per-VGW cards — VGWs reached over Direct Connect share the DXGW's

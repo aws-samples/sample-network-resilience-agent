@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { DxNode, DxEdge, TopologyData, TopologyTagFilter, ViewMode } from '../types/topology';
+import type { DxNode, DxEdge, NodeCategory, TopologyData, TopologyTagFilter, ViewMode } from '../types/topology';
 import type { CombinedAssessment } from '../types/recommendations';
 import type { ResiliencyTarget } from '../engine/resiliency-rules';
 import type { AwsCredentials, VifRoutes, VifFailoverTest } from '../types/aws-resources';
@@ -12,6 +12,7 @@ import {
   type BgpStabilityWindowDays,
 } from '../api/cloudwatch-dx';
 import { fetchVifRoutes } from '../api/dx-routes';
+import { refreshOwnTgwRouteTables } from '../api/ec2';
 import { fetchVifFailoverTests } from '../api/dx-tests';
 import { deserializeTopologyData, type SnapshotFile } from '../utils/snapshot';
 import { normalizeUserEdges } from '../utils/user-edges';
@@ -58,7 +59,18 @@ interface TopologyStore {
   recommendedNodes: DxNode[];
   recommendedEdges: DxEdge[];
   recommendedCurrentNodes: DxNode[]; // current nodes repositioned for recommended view
-  setRecommendedGraph: (nodes: DxNode[], edges: DxEdge[], currentForRec?: DxNode[]) => void;
+  setRecommendedGraph: (nodes: DxNode[], edges: DxEdge[], currentForRec?: DxNode[], pathSinkNodeIds?: string[]) => void;
+  /**
+   * The recommended path on the canvas: every ghost node and ghost edge, plus the
+   * EXISTING path they complete — the focused scope's own DX path (on-premises →
+   * device → DX gateway) up to its sink (the focused TGW, VGW or DX gateway) and
+   * the VPCs behind it. The ghosts alone stop at the DX gateway, which leaves the
+   * reader to guess what the option protects. Lit (the rest dimmed) while one
+   * card's option is clicked — `focusedDxGatewayId` set in Recommended view — so the
+   * reader sees exactly what that option adds and where it plugs in.
+   */
+  recPathNodeIds: Set<string>;
+  recPathEdgeIds: Set<string>;
 
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
@@ -249,7 +261,18 @@ interface TopologyStore {
   // knows. One selected VIF only filters the panel's rows; two or more narrow the
   // comparison itself. Either way every selected VIF is lit.
   routeDiffPickedVifIds: Set<string>;
-  setRouteDiffPickedVifIds: (vifIds: Iterable<string>) => void;
+  /**
+   * `sinkNodeId` extends the lit path DOWNSTREAM to that node: the TGW route
+   * resilience panel passes its TGW, so a picked prefix lights its carrier VIFs,
+   * their DX gateways, and the gateway→TGW edges into it. Omitted (the DX gateway
+   * panel) the path stops at the gateway, as it always has.
+   */
+  setRouteDiffPickedVifIds: (vifIds: Iterable<string>, sinkNodeId?: string | null) => void;
+  routeDiffPickedSinkNodeId: string | null;
+  // TGW route resilience panels, keyed by transitGatewayId. Same vifRoutes data as
+  // the DX gateway panels, compared across every gateway feeding the TGW.
+  expandedTgwRouteDiffPanels: Set<string>;
+  toggleTgwRouteDiffPanel: (tgwId: string) => void;
   // Derived from `routeDiffPickedVifIds`: the picked VIF edges plus their upstream
   // path back to the on-premises router, so the highlight shows which physical
   // connection each VIF rides on. Kept as precomputed sets because the
@@ -694,9 +717,88 @@ function computePath(
  * also pulls in the on-prem node for its `locationCode`, matched by id suffix the
  * same way containers match their children.
  */
+/**
+ * The existing path a recommendation completes, walked from its sink(s).
+ *
+ * Upstream only through Direct Connect kit — DX gateways, AWS devices, LAGs,
+ * partner devices, on-premises routers and ghosts — so a Site-to-Site VPN into
+ * the same TGW stays dark: it is not what a DX tier option protects. Downstream
+ * only into what the sink serves (VPCs, VPC groups, firewalls, Cloud WAN), and a
+ * DX gateway may step into its TGW/VGW; a TGW never steps into another TGW, so a
+ * focused TGW does not light a sibling the same gateway also feeds.
+ *
+ * Above an AWS device the walk is scoped by CONNECTION: one device commonly
+ * terminates links for several gateways (five at ATTC1 on a live account), and
+ * lighting every link into it would light other gateways' paths. Only the
+ * connections whose VIFs enter the path's gateways stay lit; an edge with no
+ * `connectionId` (a collapsed partner group, a ghost) is followed as before.
+ */
+const REC_UPSTREAM = new Set<NodeCategory>(['dxGateway', 'awsDevice', 'lag', 'dxPartnerDevice', 'dxPartnerDeviceGroup', 'onPremise', 'customerSite']);
+const REC_DOWNSTREAM = new Set<NodeCategory>(['vpc', 'vpcGroup', 'tgwFirewall', 'tgwConnect', 'coreNetwork']);
+const REC_GATEWAYS = new Set<NodeCategory>(['tgw', 'tgwGroup', 'vgw', 'coreNetwork']);
+
+function computeRecSinkPath(
+  sinkNodeIds: string[],
+  nodes: DxNode[],
+  edgeSets: { currentEdges: DxEdge[]; recommendedEdges: DxEdge[]; userEdges: DxEdge[] },
+  vifConnection: Map<string, string>,
+): { nodes: Set<string>; edges: Set<string> } {
+  const category = new Map(nodes.map((n) => [n.id, n.data.category]));
+  const edgeById = new Map([...edgeSets.currentEdges, ...edgeSets.recommendedEdges, ...edgeSets.userEdges].map((e) => [e.id, e]));
+  const pathConnections = new Set<string>();
+  const noteConnections = (e: DxEdge | undefined) => {
+    const vifIds = [e?.data?.vifId, ...(e?.data?.aggregatedVifs ?? []).map((v) => v.vifId)];
+    for (const id of vifIds) {
+      const conn = id != null ? vifConnection.get(id) : undefined;
+      if (conn) pathConnections.add(conn);
+    }
+  };
+  const isVpnSide = (id: string) => id.startsWith('vpn-') || id.startsWith('onprem-vpn-') || id.startsWith('custsite-vpn-');
+  const { incoming, outgoing } = getAdjMaps('recommended', edgeSets.currentEdges, edgeSets.recommendedEdges, edgeSets.userEdges);
+  const outNodes = new Set<string>();
+  const outEdges = new Set<string>();
+  const sinks = sinkNodeIds.filter((id) => category.has(id));
+
+  const up = [...sinks];
+  const seenUp = new Set(sinks);
+  while (up.length > 0) {
+    const n = up.shift()!;
+    outNodes.add(n);
+    for (const { edgeId, source } of incoming.get(n) ?? []) {
+      const cat = category.get(source);
+      const allowed = source.startsWith('rec-') || (cat != null && REC_UPSTREAM.has(cat));
+      if (!allowed || isVpnSide(source)) continue;
+      const e = edgeById.get(edgeId);
+      if (category.get(n) === 'dxGateway') noteConnections(e);
+      const conn = e?.data?.connectionId;
+      if (conn != null && category.get(n) !== 'dxGateway' && !pathConnections.has(conn)) continue;
+      outEdges.add(edgeId);
+      if (!seenUp.has(source)) { seenUp.add(source); up.push(source); }
+    }
+  }
+
+  const down = [...sinks];
+  const seenDown = new Set(sinks);
+  while (down.length > 0) {
+    const n = down.shift()!;
+    outNodes.add(n);
+    const fromDxgw = category.get(n) === 'dxGateway';
+    for (const { edgeId, target } of outgoing.get(n) ?? []) {
+      const cat = category.get(target);
+      const allowed = cat != null && (REC_DOWNSTREAM.has(cat) || (fromDxgw && REC_GATEWAYS.has(cat)));
+      // VPC → VPC is peering: a different path, not the one this option protects.
+      if (!allowed || (cat === 'vpc' && category.get(n) === 'vpc')) continue;
+      outEdges.add(edgeId);
+      if (!seenDown.has(target)) { seenDown.add(target); down.push(target); }
+    }
+  }
+  return { nodes: outNodes, edges: outEdges };
+}
+
 function computeRouteDiffPath(
   pickedVifIds: ReadonlySet<string>,
   state: { viewMode: ViewMode; currentNodes: DxNode[]; currentEdges: DxEdge[]; recommendedEdges: DxEdge[]; userEdges: DxEdge[] },
+  sinkNodeId?: string | null,
 ): { nodes: Set<string>; edges: Set<string> } {
   const nodes = new Set<string>();
   const edges = new Set<string>();
@@ -752,6 +854,18 @@ function computeRouteDiffPath(
     const loc = locationByNodeId.get(id);
     const onPremId = loc != null ? onPremByLocation.get(loc) : undefined;
     if (onPremId) nodes.add(onPremId);
+  }
+  // Downstream hop to the sink (the TGW a route-resilience pick is about): the
+  // edges from a lit node — the carrier VIFs' DX gateways — straight into it. Only
+  // gateways already on the trail, so a sibling gateway that does not carry the
+  // prefix stays dark even though it also feeds the TGW.
+  if (sinkNodeId) {
+    for (const e of allEdges) {
+      if (e.target === sinkNodeId && nodes.has(e.source)) {
+        edges.add(e.id);
+        nodes.add(sinkNodeId);
+      }
+    }
   }
   return { nodes, edges };
 }
@@ -824,7 +938,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       // bundling collapses several VIF edges into one synthetic id).
       const next = { ...state, ...base };
       const routeDiff = state.routeDiffPickedVifIds.size > 0
-        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next, state.routeDiffPickedSinkNodeId)
         : null;
       if (state.pinnedNodeId != null) {
         const path = computePath(state.pinnedNodeId, next);
@@ -844,16 +958,35 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   recommendedNodes: [],
   recommendedEdges: [],
   recommendedCurrentNodes: [],
-  setRecommendedGraph: (nodes, edges, currentForRec) =>
+  recPathNodeIds: new Set(),
+  recPathEdgeIds: new Set(),
+  setRecommendedGraph: (nodes, edges, currentForRec, pathSinkNodeIds) =>
     set((state) => {
+      const recPathNodeIds = new Set(nodes.map((n) => n.id));
+      for (const e of edges) { recPathNodeIds.add(e.source); recPathNodeIds.add(e.target); }
+      const recPathEdgeIds = new Set(edges.map((e) => e.id));
+      // Only when the option draws something: with no ghosts there is no path to
+      // feature, and `isRecPathActive` keys off a non-empty edge set.
+      if (edges.length > 0 && pathSinkNodeIds?.length) {
+        const existing = computeRecSinkPath(
+          pathSinkNodeIds,
+          [...(currentForRec ?? []), ...nodes],
+          { currentEdges: state.currentEdges, recommendedEdges: edges, userEdges: state.userEdges },
+          new Map((state.topologyData?.virtualInterfaces ?? []).map((v) => [v.virtualInterfaceId, v.connectionId])),
+        );
+        for (const id of existing.nodes) recPathNodeIds.add(id);
+        for (const id of existing.edges) recPathEdgeIds.add(id);
+      }
       const base = {
         recommendedNodes: nodes,
         recommendedEdges: edges,
         recommendedCurrentNodes: currentForRec ?? [],
+        recPathNodeIds,
+        recPathEdgeIds,
       };
       const next = { ...state, ...base };
       const routeDiff = state.routeDiffPickedVifIds.size > 0
-        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next, state.routeDiffPickedSinkNodeId)
         : null;
       if (state.pinnedNodeId != null) {
         const path = computePath(state.pinnedNodeId, next);
@@ -880,7 +1013,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       // aren't rendered.
       const next = { ...state, viewMode: mode };
       const routeDiff = state.routeDiffPickedVifIds.size > 0
-        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next)
+        ? computeRouteDiffPath(state.routeDiffPickedVifIds, next, state.routeDiffPickedSinkNodeId)
         : null;
       return {
         viewMode: mode,
@@ -1160,6 +1293,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
         showLiveStatus: false,
         expandedVifRoutePanels: new Set<string>(),
         expandedDxgwRouteDiffPanels: new Set<string>(),
+        expandedTgwRouteDiffPanels: new Set<string>(),
         showBgpHistory: false,
       });
       return;
@@ -1331,7 +1465,12 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
     }
     set({ vifRoutesLoading: true, vifRoutesError: null });
     try {
-      const routes = await fetchVifRoutes(credentials, topologyData.virtualInterfaces);
+      // VIF routes and this account's TGW route tables are read together, so the
+      // per-prefix grades and the TGW's Active via column describe one moment.
+      const [routes, tgwRouteTables] = await Promise.all([
+        fetchVifRoutes(credentials, topologyData.virtualInterfaces),
+        refreshOwnTgwRouteTables(credentials, topologyData),
+      ]);
       const latestTopology = get().topologyData;
       if (!latestTopology) return;
       if (routes.size === 0) {
@@ -1341,7 +1480,7 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
         });
         return;
       }
-      const next: TopologyData = { ...latestTopology, vifRoutes: routes };
+      const next: TopologyData = { ...latestTopology, vifRoutes: routes, tgwRouteTables, routesReadAt: new Date().toISOString() };
       set({
         topologyData: next,
         vifRoutesCache: routes,
@@ -1374,7 +1513,9 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       vifRoutesError: null,
       expandedVifRoutePanels: new Set(),
       expandedDxgwRouteDiffPanels: new Set(),
+      expandedTgwRouteDiffPanels: new Set(),
       routeDiffPickedVifIds: new Set(),
+      routeDiffPickedSinkNodeId: null,
       routeDiffPickedEdgeIds: new Set(),
       routeDiffPickedNodeIds: new Set(),
     }),
@@ -1397,9 +1538,29 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
         expandedDxgwRouteDiffPanels: next,
         // Closing the last panel drops the canvas highlight with it — leaving
         // edges lit with no panel to explain them looks like a rendering bug.
-        ...(closing && next.size === 0
+        ...(closing && next.size === 0 && state.expandedTgwRouteDiffPanels.size === 0
           ? {
               routeDiffPickedVifIds: new Set<string>(),
+              routeDiffPickedEdgeIds: new Set<string>(),
+              routeDiffPickedNodeIds: new Set<string>(),
+            }
+          : {}),
+      };
+    }),
+
+  expandedTgwRouteDiffPanels: new Set(),
+  toggleTgwRouteDiffPanel: (tgwId) =>
+    set((state) => {
+      const next = new Set(state.expandedTgwRouteDiffPanels);
+      const closing = next.has(tgwId);
+      if (closing) next.delete(tgwId);
+      else next.add(tgwId);
+      return {
+        expandedTgwRouteDiffPanels: next,
+        ...(closing && next.size === 0 && state.expandedDxgwRouteDiffPanels.size === 0
+          ? {
+              routeDiffPickedVifIds: new Set<string>(),
+              routeDiffPickedSinkNodeId: null,
               routeDiffPickedEdgeIds: new Set<string>(),
               routeDiffPickedNodeIds: new Set<string>(),
             }
@@ -1410,19 +1571,23 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
   routeDiffPickedVifIds: new Set(),
   routeDiffPickedEdgeIds: new Set(),
   routeDiffPickedNodeIds: new Set(),
-  setRouteDiffPickedVifIds: (vifIds) =>
+  routeDiffPickedSinkNodeId: null,
+  setRouteDiffPickedVifIds: (vifIds, sinkNodeId) =>
     set((state) => {
       const next = new Set(vifIds);
+      const sink = sinkNodeId ?? null;
       if (
-        next.size === state.routeDiffPickedVifIds.size
+        sink === state.routeDiffPickedSinkNodeId
+        && next.size === state.routeDiffPickedVifIds.size
         && [...next].every((id) => state.routeDiffPickedVifIds.has(id))
       ) {
         // Same set — return nothing so every edge doesn't re-render on a no-op.
         return {};
       }
-      const path = computeRouteDiffPath(next, state);
+      const path = computeRouteDiffPath(next, state, sink);
       return {
         routeDiffPickedVifIds: next,
+        routeDiffPickedSinkNodeId: sink,
         routeDiffPickedEdgeIds: path.edges,
         routeDiffPickedNodeIds: path.nodes,
       };
@@ -2085,7 +2250,9 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
       vifRoutesError: null,
       expandedVifRoutePanels: new Set(),
       expandedDxgwRouteDiffPanels: new Set(),
+      expandedTgwRouteDiffPanels: new Set(),
       routeDiffPickedVifIds: new Set(),
+      routeDiffPickedSinkNodeId: null,
       routeDiffPickedEdgeIds: new Set(),
       routeDiffPickedNodeIds: new Set(),
       utilizationWindowDays: view.utilizationWindowDays,
@@ -2165,3 +2332,11 @@ export const useTopologyStore = create<TopologyStore>((set, get) => ({
     });
   },
 }));
+
+/**
+ * True while one card's option is clicked and its recommended path is on the
+ * canvas. Shared by nodes and edges so both agree on when the highlight is on.
+ */
+export function isRecPathActive(s: TopologyStore): boolean {
+  return s.viewMode === 'recommended' && s.focusedDxGatewayId != null && s.recPathEdgeIds.size > 0;
+}

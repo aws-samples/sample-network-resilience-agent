@@ -355,3 +355,48 @@ export function findReusableLocation(
   );
   return withCapacity ?? candidates[0];
 }
+
+/**
+ * The 99.99% Maximum tier, as the AWS Direct Connect SLA defines a Multi-Site
+ * Redundant Deployment: "at least four Connections deployed across a minimum of two
+ * Direct Connect locations (where no fewer than two Connections are deployed in each
+ * of the two Direct Connect locations)", each on a unique AWS device
+ * (https://aws.amazon.com/directconnect/sla/).
+ *
+ * So TWO device-redundant locations are the bar. A third location on a single device
+ * adds a site; it does not disqualify the tier. An earlier rule demanded two devices
+ * at EVERY location, which told an estate with ATTC1 x2, EqTY2 x2 and KDOS2 x1 that
+ * it was short of Maximum and to add a device at KDOS2.
+ *
+ * `perLocation` is the count of distinct AWS logical devices (or LAGs, for the LAG
+ * tier) per DX location.
+ */
+export const MAXIMUM_TIER_LOCATIONS = 2;
+
+export function meetsMaximumTier(perLocation: Iterable<number>): boolean {
+  let redundant = 0;
+  for (const c of perLocation) if (c >= 2) redundant += 1;
+  return redundant >= MAXIMUM_TIER_LOCATIONS;
+}
+
+/**
+ * The locations to give a second device so the scope reaches Maximum — the fewest
+ * that close the gap, not every single-device location. Empty when already met.
+ * `alreadyRedundant` counts extra locations as device-redundant (a shared-downstream
+ * group that already has two devices there). Ties go to the location code, so the
+ * choice is stable between renders.
+ */
+export function maximumTierGapLocations(
+  perLocation: ReadonlyMap<string, number>,
+  alreadyRedundant: ReadonlySet<string> = new Set(),
+): string[] {
+  const isRedundant = (loc: string, c: number) => c >= 2 || alreadyRedundant.has(loc);
+  const redundant = [...perLocation].filter(([loc, c]) => isRedundant(loc, c)).length;
+  const needed = MAXIMUM_TIER_LOCATIONS - redundant;
+  if (needed <= 0) return [];
+  return [...perLocation]
+    .filter(([loc, c]) => !isRedundant(loc, c))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, needed)
+    .map(([loc]) => loc);
+}

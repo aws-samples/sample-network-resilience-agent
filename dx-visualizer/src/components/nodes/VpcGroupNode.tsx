@@ -4,6 +4,7 @@ import type { DxNodeData, VpcChildInfo } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
 import { VPC_TABLE_MAX_BODY_HEIGHT, VPC_TABLE_WIDTH, dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
+import { useRecPathMuted } from './useRecPathMuted';
 import { VpcIcon } from './aws-icons';
 import { TagMarker } from './TagMarker';
 
@@ -18,7 +19,8 @@ export function VpcGroupNode({ data, id }: NodeProps) {
   const highlightedNodeIds = useTopologyStore((s) => s.highlightedNodeIds);
   const hasHoverActive = hoveredNodeId != null;
   const isOnHoverPath = hasHoverActive && highlightedNodeIds.has(id);
-  const isDimmed = hasHoverActive && !isOnHoverPath;
+  const isRecPathMuted = useRecPathMuted(id);
+  const isDimmed = (hasHoverActive && !isOnHoverPath) || isRecPathMuted;
   const tagMatchIds = useTopologyStore((s) => s.tagFilters.length > 0 ? s.tagMatchIds : null);
 
   const details = d.details as Record<string, string> | undefined;

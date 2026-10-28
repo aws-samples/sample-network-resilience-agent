@@ -105,6 +105,12 @@ export interface TopologyData {
    * snapshots taken before this existed still load.
    */
   fetchIssues?: FetchIssue[];
+  /**
+   * When VIF routes and this account's TGW route tables were last read TOGETHER
+   * (ISO). Set by the live route fetch; the report prints it so a reader knows the
+   * grades and the Active via column describe the same moment.
+   */
+  routesReadAt?: string;
 }
 
 /** Severity of a partial-data problem, which decides how the banner reads. */

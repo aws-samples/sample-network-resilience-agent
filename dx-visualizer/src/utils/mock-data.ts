@@ -78,6 +78,47 @@ function vifRoutesEntry(accepted: VifRoute[], advertised: VifRoute[]): VifRoutes
   return { accepted, advertised };
 }
 
+/**
+ * Install each DX gateway's on-prem prefixes into the route tables of the TGWs it
+ * attaches to, as a real TGW would: propagated, against the DX gateway attachment.
+ * Derived from the gateway's own VIF routes so the demo route table can never
+ * disagree with the VIF matrix beside it. A prefix arriving from two gateways is
+ * installed once — AWS shows only the preferred route — so the first attachment
+ * keeps it, and a copy whose AS path holds the TGW's own ASN is skipped, as the
+ * TGW would discard it. Without this the mock tables hold VPC routes only, and the TGW route
+ * resilience panel reports every on-prem prefix as missing from the TGW.
+ */
+function installDxPropagatedRoutes(topology: TopologyData): void {
+  for (const [tgwId, tables] of topology.tgwRouteTables) {
+    const table = tables[0];
+    if (!table) continue;
+    // A real TGW discards a route whose AS path already holds its own ASN.
+    const tgwAsn = topology.transitGateways.find((t) => t.transitGatewayId === tgwId)?.amazonSideAsn;
+    const have = new Set(table.routes.map((rt) => rt.destinationCidrBlock));
+    for (const att of topology.transitGatewayAttachments) {
+      if (att.transitGatewayId !== tgwId || att.resourceType !== 'direct-connect-gateway') continue;
+      for (const v of topology.virtualInterfaces) {
+        if (v.directConnectGatewayId !== att.resourceId) continue;
+        for (const rt of topology.vifRoutes?.get(v.virtualInterfaceId)?.accepted ?? []) {
+          if (have.has(rt.cidr)) continue;
+          if (tgwAsn != null && (rt.asPath ?? []).some((seg) => seg.path.includes(tgwAsn))) continue;
+          have.add(rt.cidr);
+          table.routes.push({
+            destinationCidrBlock: rt.cidr,
+            transitGatewayAttachments: [{
+              transitGatewayAttachmentId: att.transitGatewayAttachmentId,
+              resourceType: 'direct-connect-gateway',
+              resourceId: att.resourceId,
+            }],
+            type: 'propagated',
+            state: 'active',
+          });
+        }
+      }
+    }
+  }
+}
+
 export function mockRoutesForTgw(tgwId: string, vpcCidrs: string[], attachmentIds: string[]): TgwRouteTableWithRoutes[] {
   return [{
     routeTable: {
@@ -1327,6 +1368,7 @@ highResiliencyTopology.maintenanceEvents = mockUpcomingMaintenance(
   highResiliencyTopology.connections,
   highResiliencyTopology.virtualInterfaces,
 );
+installDxPropagatedRoutes(highResiliencyTopology);
 
 export const maximumResiliencyTopology: TopologyData = {
   homeAccountId: '123456789012',
@@ -1749,6 +1791,8 @@ export const maximumResiliencyTopology: TopologyData = {
   cloudWanRoutes: new Map(),
 };
 
+installDxPropagatedRoutes(maximumResiliencyTopology);
+
 export const crossAccountTopology: TopologyData = {
   homeAccountId: '111111111111',
   // Three transit VIFs on dxgw-hub01 with matching prefix sets — the hub-and-spoke
@@ -1758,18 +1802,31 @@ export const crossAccountTopology: TopologyData = {
   // dxgw-hub01 — hub TGW, both spoke TGWs and the spoke VGW — because the DX
   // gateway reflects all of them onto each of its virtual interfaces. That is
   // what makes a spoke's prefixes reachable from on-premises at all.
-  vifRoutes: new Map(
-    ['dxvif-hub01', 'dxvif-hub02', 'dxvif-hub03'].map((id) => [
+  vifRoutes: new Map([
+    ...['dxvif-hub01', 'dxvif-hub02', 'dxvif-hub03'].map((id) => [
       id,
       vifRoutesEntry(
-        mockAcceptedRoutes(18, 60, 65000),
+        // 10.99.0.0/24 arrives with AS 64512 already in its path — the Hub-TGW's
+        // own ASN, reused somewhere on-premises. Every VIF accepts it; Hub-TGW
+        // discards it (BGP loop prevention), so it never reaches the hub VPCs.
+        [...mockAcceptedRoutes(18, 60, 65000), mockRoute('10.99.0.0/24', 'accepted', [65000, 64512], [], 40)],
         mockAdvertisedRoutes([
           '10.0.0.0/16', '10.1.0.0/16', '172.16.0.0/12',
           '10.20.0.0/16', '10.30.0.0/16', '10.40.0.0/16',
         ]),
       ),
-    ]),
-  ),
+    ] as const),
+    // Spoke D's branch gateways: one VIF each, only spoke D's slice advertised back.
+    // The Tokyo branch carries only the first eight of Singapore's twelve /24s,
+    // plus one of its own — so on tgw-spoke-d, 10.70.8-11 and 10.71.0 each have a
+    // single path while 10.70.0-7 survive either site. The TGW-level gap this
+    // demo exists to show: no single gateway looks wrong on its own.
+    ['dxvif-brsg01', vifRoutesEntry(mockAcceptedRoutes(12, 70, 65010), mockAdvertisedRoutes(['10.50.0.0/16']))] as const,
+    ['dxvif-brty01', vifRoutesEntry(
+      [...mockAcceptedRoutes(8, 70, 65010), ...mockAcceptedRoutes(1, 71, 65010)],
+      mockAdvertisedRoutes(['10.50.0.0/16']),
+    )] as const,
+  ]),
   locations: [
     {
       locationCode: 'EqSG2',
@@ -1817,6 +1874,30 @@ export const crossAccountTopology: TopologyData = {
       hasBfd: true,
       awsDeviceV2: 'EqTY2-9a0b1c2d',
       awsLogicalDeviceId: 'EqTY2-lg1a',
+    },
+    // Spoke D branch office: one link per site, each on a device the hub does not
+    // use, so the branch path shares no AWS device with the hub's.
+    {
+      connectionId: 'dxcon-brsg01',
+      connectionName: 'DX-Branch-SG',
+      connectionState: 'available',
+      location: 'EqSG2',
+      bandwidth: '1Gbps',
+      region: 'ap-southeast-1',
+      hasBfd: true,
+      awsDeviceV2: 'EqSG2-3c4d5e6f',
+      awsLogicalDeviceId: 'EqSG2-lg1c',
+    },
+    {
+      connectionId: 'dxcon-brty01',
+      connectionName: 'DX-Branch-TY',
+      connectionState: 'available',
+      location: 'EqTY2',
+      bandwidth: '1Gbps',
+      region: 'ap-northeast-1',
+      hasBfd: true,
+      awsDeviceV2: 'EqTY2-7e8f9a0b',
+      awsLogicalDeviceId: 'EqTY2-lg1b',
     },
   ],
   virtualInterfaces: [
@@ -1868,12 +1949,60 @@ export const crossAccountTopology: TopologyData = {
       awsDeviceV2: 'EqTY2-9a0b1c2d',
       awsLogicalDeviceId: 'EqTY2-lg1a',
     },
+    {
+      virtualInterfaceId: 'dxvif-brsg01',
+      virtualInterfaceName: 'Transit-VIF-Branch-SG',
+      virtualInterfaceType: 'transit',
+      virtualInterfaceState: 'available',
+      connectionId: 'dxcon-brsg01',
+      directConnectGatewayId: 'dxgw-brsg01',
+      vlan: 410,
+      asn: 65010,
+      bgpPeers: [
+        { bgpPeerId: 'bgp-br01', bgpPeerState: 'available', bgpStatus: 'up', asn: 65010, customerAddress: '169.254.10.2/30', amazonAddress: '169.254.10.1/30' },
+      ],
+      region: 'ap-southeast-1',
+      awsDeviceV2: 'EqSG2-3c4d5e6f',
+      awsLogicalDeviceId: 'EqSG2-lg1c',
+    },
+    {
+      virtualInterfaceId: 'dxvif-brty01',
+      virtualInterfaceName: 'Transit-VIF-Branch-TY',
+      virtualInterfaceType: 'transit',
+      virtualInterfaceState: 'available',
+      connectionId: 'dxcon-brty01',
+      directConnectGatewayId: 'dxgw-brty01',
+      vlan: 420,
+      asn: 65010,
+      bgpPeers: [
+        { bgpPeerId: 'bgp-br02', bgpPeerState: 'available', bgpStatus: 'up', asn: 65010, customerAddress: '169.254.11.2/30', amazonAddress: '169.254.11.1/30' },
+      ],
+      region: 'ap-northeast-1',
+      awsDeviceV2: 'EqTY2-7e8f9a0b',
+      awsLogicalDeviceId: 'EqTY2-lg1b',
+    },
   ],
   dxGateways: [
     {
       directConnectGatewayId: 'dxgw-hub01',
       directConnectGatewayName: 'Hub-DX-Gateway',
       amazonSideAsn: 64512,
+      directConnectGatewayState: 'available',
+    },
+    // Two single-site gateways that only make sense together: each is Dev/Test on
+    // its own, and the Transit Gateway they both reach is site-redundant — the
+    // TGW-level grading case. Kept off the hub's TGWs so their shared downstream
+    // is spoke D's TGW alone.
+    {
+      directConnectGatewayId: 'dxgw-brsg01',
+      directConnectGatewayName: 'Branch-DX-Gateway-SG',
+      amazonSideAsn: 64520,
+      directConnectGatewayState: 'available',
+    },
+    {
+      directConnectGatewayId: 'dxgw-brty01',
+      directConnectGatewayName: 'Branch-DX-Gateway-TY',
+      amazonSideAsn: 64521,
       directConnectGatewayState: 'available',
     },
   ],
@@ -1933,6 +2062,20 @@ export const crossAccountTopology: TopologyData = {
       associationState: 'associated',
       allowedPrefixes: ['10.40.0.0/16'],
     },
+    // Spoke account D - one TGW reached through BOTH branch gateways (cross-account
+    // via RAM). Not in DescribeTransitGateways, like the other spokes, so it is
+    // graded by the id the association carries.
+    ...['dxgw-brsg01', 'dxgw-brty01'].map((dxgwId) => ({
+      directConnectGatewayId: dxgwId,
+      associatedGateway: {
+        id: 'tgw-spoke-d',
+        type: 'transitGateway' as const,
+        region: 'ap-southeast-1',
+        ownerAccount: '555555555555',
+      },
+      associationState: 'associated',
+      allowedPrefixes: ['10.50.0.0/16'],
+    })),
   ],
   lags: [],
   // Only hub account's VPCs are visible — spoke VPCs are discovered via TGW attachment resourceOwnerId
@@ -2007,6 +2150,8 @@ export const crossAccountTopology: TopologyData = {
   cloudWanPeerings: [],
   cloudWanRoutes: new Map(),
 };
+
+installDxPropagatedRoutes(crossAccountTopology);
 
 export type { MockScenario } from './shared';
 

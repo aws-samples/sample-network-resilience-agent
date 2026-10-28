@@ -16,6 +16,9 @@ Legend:
 | `no-tgw` | No Transit Gateway for scalable VPC attachment | Detected | `DescribeTransitGateways` |
 | `single-vgw` | Reliance on a single VGW | Detected | `DescribeVpnGateways` |
 | `no-lag` | No Link Aggregation Group | Detected | `DescribeLags` |
+| `tgw-single-transit-vif` | Only one transit VIF reaches a Transit Gateway (all its DX gateways combined) | Detected | `DescribeDirectConnectGatewayAssociations` + transit VIFs |
+| `tgw-single-dx-location` | All transit VIFs reaching a Transit Gateway land at one DX location | Detected | Same, grouped by location |
+| `tgw-single-device-per-location` | One AWS logical device at a location on a Transit Gateway's transit path (Maximum only) | Detected | `awsLogicalDeviceId` across the TGW's transit VIFs |
 
 ## Best practice rules — Architecture
 

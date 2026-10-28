@@ -16,6 +16,9 @@ import {
 } from '@aws-sdk/client-ec2';
 import type { Vpc, VpnGateway, VpnConnection, TransitGateway, TransitGatewayAttachment, TransitGatewayPeeringAttachment, VpcPeeringConnection, CustomerGateway, TgwRouteTable, TgwRoute, TgwRouteTableWithRoutes, TgwRouteTablePropagation, VpcRouteTable, VpcRoute } from '../types/aws-resources';
 import { drainPages } from './paginate';
+import { createEc2Client } from './aws-client';
+import type { AwsCredentials } from '../types/aws-resources';
+import type { TopologyData } from '../types/topology';
 
 /**
  * Page cap for the EC2 describe paginators. DescribeRouteTables returns up to
@@ -214,11 +217,25 @@ export async function fetchTgwRouteTables(client: EC2Client, transitGatewayId: s
 }
 
 export async function fetchTgwRoutes(client: EC2Client, routeTableId: string): Promise<TgwRoute[]> {
+  return (await fetchTgwRoutesWithTruncation(client, routeTableId)).routes;
+}
+
+/**
+ * `SearchTransitGatewayRoutes` has no page token: it returns up to `MaxResults`
+ * routes and sets `AdditionalRoutesAvailable` when it stopped short. Recorded so
+ * a prefix absent from a truncated table reads "unknown", not "not in the TGW".
+ */
+export async function fetchTgwRoutesWithTruncation(
+  client: EC2Client,
+  routeTableId: string,
+): Promise<{ routes: TgwRoute[]; truncated: boolean }> {
   const res = await client.send(new SearchTransitGatewayRoutesCommand({
     TransitGatewayRouteTableId: routeTableId,
     Filters: [{ Name: 'state', Values: ['active', 'blackhole'] }],
   }));
-  return (res.Routes ?? []).map((r) => ({
+  const truncated = res.AdditionalRoutesAvailable === true;
+  if (truncated) console.warn(`[AWS] SearchTransitGatewayRoutes(${routeTableId}) truncated — more routes exist than were returned`);
+  const routes = (res.Routes ?? []).map((r) => ({
     destinationCidrBlock: r.DestinationCidrBlock ?? '',
     transitGatewayAttachments: (r.TransitGatewayAttachments ?? []).map((a) => ({
       transitGatewayAttachmentId: a.TransitGatewayAttachmentId ?? '',
@@ -228,6 +245,7 @@ export async function fetchTgwRoutes(client: EC2Client, routeTableId: string): P
     type: (r.Type === 'static' ? 'static' : 'propagated') as 'static' | 'propagated',
     state: (r.State === 'blackhole' ? 'blackhole' : 'active') as 'active' | 'blackhole',
   }));
+  return { routes, truncated };
 }
 
 /**
@@ -333,7 +351,7 @@ export async function fetchTgwRouteTablesWithRoutes(
   const results = await Promise.all(
     routeTables.map(async (rt) => {
       const [routes, propagations] = await Promise.all([
-        fetchTgwRoutes(client, rt.transitGatewayRouteTableId),
+        fetchTgwRoutesWithTruncation(client, rt.transitGatewayRouteTableId),
         includePropagations
           ? fetchTgwRouteTablePropagations(client, rt.transitGatewayRouteTableId).catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);
@@ -345,8 +363,45 @@ export async function fetchTgwRouteTablesWithRoutes(
             })
           : Promise.resolve(undefined),
       ]);
-      return { routeTable: rt, routes, propagations };
+      return {
+        routeTable: rt,
+        routes: routes.routes,
+        propagations,
+        ...(routes.truncated ? { routesTruncated: true } : {}),
+      };
     })
   );
   return results;
+}
+
+/**
+ * Re-read the route tables of this account's own Transit Gateways.
+ *
+ * Called together with the VIF route fetch so the two describe the same moment.
+ * The login sweep reads TGW route tables once; VIF routes are read later (Live, or
+ * report export), and on a flapping estate the two then disagree — a prefix the
+ * VIFs no longer carry still shows as installed, and the report graded it
+ * "Rejected" beside an Active via gateway. Only TGWs this account owns are
+ * refreshed (spoke-account tables need an assumed role and keep their login read).
+ * A TGW whose refresh fails keeps its previous tables rather than going blank.
+ */
+export async function refreshOwnTgwRouteTables(
+  creds: AwsCredentials,
+  topology: Pick<TopologyData, 'transitGateways' | 'tgwRouteTables' | 'homeAccountId'>,
+): Promise<TopologyData['tgwRouteTables']> {
+  const next = new Map(topology.tgwRouteTables);
+  const own = topology.transitGateways.filter((t) =>
+    topology.tgwRouteTables.has(t.transitGatewayId)
+    && (!topology.homeAccountId || t.ownerId === topology.homeAccountId));
+  await Promise.all(own.map(async (tgw) => {
+    // arn:aws:ec2:<region>:<account>:transit-gateway/<id>
+    const region = tgw.transitGatewayArn.split(':')[3] || creds.region;
+    try {
+      const tables = await fetchTgwRouteTablesWithRoutes(createEc2Client({ ...creds, region }), tgw.transitGatewayId, true);
+      if (tables.length > 0) next.set(tgw.transitGatewayId, tables);
+    } catch (err) {
+      console.warn(`[AWS] TGW route refresh(${tgw.transitGatewayId}) failed — keeping the login read:`, err instanceof Error ? err.message : String(err));
+    }
+  }));
+  return next;
 }

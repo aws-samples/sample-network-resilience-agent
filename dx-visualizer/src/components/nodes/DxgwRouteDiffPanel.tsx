@@ -6,6 +6,56 @@ import { computeDxgwRouteDiff } from '../../engine/vif-route-diff';
 import { useTopologyStore } from '../../store/topology-store';
 import { useRedact } from '../../utils/redact';
 import { parseIpRange, rangeCovers, rangesOverlap, type IpRange } from '../../utils/cidr';
+import type { TgwRouteTableWithRoutes } from '../../types/aws-resources';
+import {
+  gradePrefix, activeViaForPrefix, PREFIX_GRADE_RANK, type PrefixGrade, type ActiveVia, type RejectedCopy,
+} from '../../engine/tgw-route-resilience';
+
+/**
+ * Transit Gateway mode. The same matrix, compared across every transit VIF on
+ * every DX gateway feeding one TGW, plus what only a TGW view can add: a grade per
+ * prefix against the TGW tiers, which gateway the TGW is forwarding it to right
+ * now, and a path highlight that runs on into the TGW.
+ */
+export interface TgwPanelContext {
+  tgwId: string;
+  /** Canvas node the lit path runs into (`tgw-<id>`). */
+  sinkNodeId: string;
+  /** Undefined when the TGW's tables are unreadable (cross-account, not fetched). */
+  routeTables?: TgwRouteTableWithRoutes[];
+  gatewayName: (dxGatewayId: string) => string;
+  /** The TGW's Amazon-side ASN; undefined when unreadable (cross-account). */
+  asn?: number;
+  /** Copies the TGW discards because their AS path already holds its ASN. */
+  isRejected?: RejectedCopy;
+  /** Account that owns the TGW when it is not this one (route table/ASN unreadable). */
+  foreignOwner?: string;
+  /** Prefixes whose grade and route table disagree (read at different moments). */
+  mismatchedCidrs?: ReadonlySet<string>;
+}
+
+const GRADE_LABEL: Record<PrefixGrade, string> = {
+  rejected: '⊘ Rejected',
+  none: '✖ No backup',
+  partial: '△ Partial',
+  device: '⚡ 1 device',
+  site: '⚑ 1 site',
+  high: '✓ High',
+  maximum: '✓ Maximum',
+  unknown: '? Unknown',
+};
+const GRADE_TITLE: Record<PrefixGrade, string> = {
+  rejected: "Every copy's AS path already contains this Transit Gateway's own ASN, so the TGW discards them (BGP loop prevention) — accepted on the VIFs, never installed in the TGW",
+  none: 'One usable VIF carries this prefix — losing it loses the prefix',
+  partial: 'No other path carries the whole block — part of it has no backup',
+  device: 'Every path terminates on one AWS logical device — DX maintenance on it loses the prefix',
+  site: 'Every path sits in one DX location — a site failure loses the prefix',
+  high: 'Paths in two or more DX locations — survives a site failure',
+  maximum: 'Two or more DX locations, two or more AWS devices at each',
+  unknown: "A carrier's device or location could not be resolved, so the grade is not confirmed",
+};
+const GRADE_COL = 'Grade';
+const VIA_COL = 'Active via';
 
 interface DxgwRouteDiffPanelProps {
   /** Gateway-wide comparison: every VIF on the gateway. The baseline a narrowed
@@ -14,8 +64,10 @@ interface DxgwRouteDiffPanelProps {
   gatewayName: string;
   onClose: () => void;
   nodeId: string;
-  /** Needed to recompute the comparison when the user narrows it to a subset. */
-  dxGatewayId: string;
+  /** Needed to recompute the comparison when the user narrows it to a subset.
+   *  A set in Transit Gateway mode: every DX gateway feeding the TGW. */
+  dxGatewayId: string | ReadonlySet<string>;
+  tgw?: TgwPanelContext;
 }
 
 type FamilyFilter = 'all' | 'ipv4' | 'ipv6';
@@ -33,6 +85,8 @@ const INDEX_HEADER = '#';
 // in it. Sized for the column NUMBER above it rather than the glyph: those numbers
 // tie a column to a tab, so they have to stay legible at zoom < 1.
 const CELL_W = 24;
+// One matrix row's height at zoom 1 — the floor the route list keeps open.
+const ROW_H = 18;
 const MARK_GAP = 3;
 // Space reserved inside the prefix column for a shared-fate chip (`⚡ 1 device`).
 // It has to live *inside* that column, not after it: the matrix columns are
@@ -52,7 +106,7 @@ function Mono({ children }: { children: React.ReactNode }) {
   return <span style={MONO}>{children}</span>;
 }
 
-export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatewayId }: DxgwRouteDiffPanelProps) {
+export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatewayId, tgw }: DxgwRouteDiffPanelProps) {
   const theme = useTopologyStore((s) => s.theme);
   const r = useRedact();
   const light = theme === 'light';
@@ -77,6 +131,12 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   const [family, setFamily] = useState<FamilyFilter>('all');
   const [filterText, setFilterText] = useState('');
   const [warnFirst, setWarnFirst] = useState(true);
+  // One prefix picked from the matrix: its carriers (and, in TGW mode, the path on
+  // into the TGW) light up on the canvas. Takes precedence over the tab selection
+  // while set, since it is the more specific question.
+  const [pickedCidr, setPickedCidr] = useState<string | null>(null);
+  // Where the strip and the empty states say the prefixes live.
+  const where = tgw ? 'reaching this Transit Gateway' : 'on this gateway';
 
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ startX: number; startY: number; startOffX: number; startOffY: number } | null>(null);
@@ -159,9 +219,35 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   // VIF edges. Every selected VIF is lit, including a lone one: the tab bar means
   // "which VIFs are in play", and one in play is still a claim worth showing on
   // the canvas. ALL (nothing selected) lights nothing.
+  const pickedRow = useMemo(
+    () => (pickedCidr ? activeDiff.rows.find((row) => row.cidr === pickedCidr) ?? null : null),
+    [pickedCidr, activeDiff.rows],
+  );
   useEffect(() => {
-    setRouteDiffPickedVifIds(selectedVifIds);
-  }, [selectedVifIds, setRouteDiffPickedVifIds]);
+    const carriers = pickedRow
+      ? activeDiff.vifs
+        .filter((v) => {
+          const state = pickedRow.cells.get(v.vifId)?.state;
+          return state === 'exact' || state === 'covered';
+        })
+        .map((v) => v.vifId)
+      : selectedVifIds;
+    setRouteDiffPickedVifIds(carriers, tgw?.sinkNodeId);
+  }, [pickedRow, activeDiff.vifs, selectedVifIds, setRouteDiffPickedVifIds, tgw?.sinkNodeId]);
+
+  // TGW mode: one grade per prefix, over the ACTIVE comparison, so narrowing to a
+  // pair regrades exactly as the matrix does.
+  const gradeOf = useMemo(() => {
+    const m = new Map<string, PrefixGrade>();
+    if (tgw) for (const row of activeDiff.rows) m.set(row.cidr, gradePrefix(row, activeDiff.vifs, tgw.isRejected));
+    return m;
+  }, [tgw, activeDiff]);
+  const showVia = !!tgw?.routeTables && tgw.routeTables.length > 0;
+  const rejectedCount = [...gradeOf.values()].filter((g) => g === 'rejected').length;
+  const viaOf = useCallback(
+    (cidr: string): ActiveVia => activeViaForPrefix(tgw?.routeTables, cidr),
+    [tgw?.routeTables],
+  );
 
   // Clearing the highlight is the panel's job on unmount; the store also clears
   // it when the last panel closes, but an unmount for any other reason (topology
@@ -240,8 +326,11 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
     );
     // `diff.rows` is already prefix-sorted, so a stable sort by rank alone keeps
     // prefix order inside each rank.
-    return warnFirst ? [...rows].sort((a, b) => rank(a) - rank(b)) : rows;
-  }, [scoped, passesFamily, needle, warnFirst, query, rangeOf]);
+    const tgwRank = (row: DiffRow) => PREFIX_GRADE_RANK[gradeOf.get(row.cidr) ?? 'unknown'];
+    return warnFirst
+      ? [...rows].sort((a, b) => (tgw ? tgwRank(a) - tgwRank(b) : rank(a) - rank(b)))
+      : rows;
+  }, [scoped, passesFamily, needle, warnFirst, query, rangeOf, tgw, gradeOf]);
 
   const shownSolo = visible.filter((row) => row.verdict === 'solo').length;
   const shownPartial = visible.filter((row) => row.verdict === 'partial').length;
@@ -331,15 +420,26 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   const indexColBase = textCol(String(diff.rows.length), INDEX_HEADER);
 
   const MARGIN = 8;
+  // Zoom is capped against BASE_MAX_H so text never outgrows the screen; the
+  // panel itself may grow to BASE_MAX_H_TALL (still within the viewport) so the
+  // tab bar, filter and verdict strips can wrap without squeezing the routes —
+  // a 6-VIF TGW wraps its tabs onto three lines, and at a fixed 400 the rows
+  // were left about six lines of scroll.
   const BASE_MAX_H = 400;
+  const BASE_MAX_H_TALL = 680;
   const H_PADDING = 20;
   const SCROLLBAR_W = 10;
   const matrixBase = columns.length * (CELL_W + MARK_GAP);
+  // TGW columns, sized off the whole gateway set for the same no-jump reason.
+  const gradeColBase = tgw ? textCol(longestOf(Object.values(GRADE_LABEL)), GRADE_COL) + 12 : 0;
+  const viaColBase = showVia
+    ? textCol(longestOf([...new Set(columns.map((c) => (c.dxGatewayId ? r(tgw!.gatewayName(c.dxGatewayId)) : '')))]), VIA_COL)
+    : 0;
   const baseWidth = Math.max(
     // Floor keeps the tab bar, filter row, and legend legible on a gateway whose
     // prefixes are all short.
     400,
-    indexColBase + prefixColBase + matrixBase + H_PADDING + SCROLLBAR_W,
+    indexColBase + prefixColBase + matrixBase + gradeColBase + viaColBase + H_PADDING + SCROLLBAR_W,
   );
   // Scale with zoom like the sibling panels, but capped so a wide matrix at high
   // zoom can't push columns off-screen.
@@ -349,7 +449,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
     (window.innerHeight - MARGIN * 2) / BASE_MAX_H,
   );
   const panelWidth = baseWidth * z;
-  const panelMaxHeight = BASE_MAX_H * z;
+  const panelMaxHeight = Math.min(window.innerHeight - MARGIN * 2, BASE_MAX_H_TALL * z);
   // Beside the gateway, not under it. The sibling route panels right-align under
   // their node, which works for TGW/VPC in the rightmost columns — but the DXGW
   // sits mid-graph, so the same math drops the widest panel of the set straight
@@ -372,6 +472,8 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   const prefixColW = prefixColBase * z;
   const indexColW = indexColBase * z;
   const cellW = CELL_W * z;
+  const gradeColW = gradeColBase * z;
+  const viaColW = viaColBase * z;
 
   const tabStyle = (isSelected: boolean) => ({
     fontSize: `${8 * z}px`,
@@ -406,6 +508,24 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
   const absentColor = light ? '#64748b' : '#94a3b8';
 
   const totalGaps = activeDiff.totalSolo + activeDiff.totalPartial;
+  const gradeColor = (g: PrefixGrade) => (
+    // `rejected` is the worst grade — it fell through to okColor and read green.
+    g === 'rejected' || g === 'none' || g === 'partial' ? dangerColor
+      : g === 'device' || g === 'site' ? warnColor
+        : g === 'unknown' ? absentColor
+          : okColor
+  );
+  // Contiguous runs of columns per gateway — `computeDxgwRouteDiff` sorts gateway
+  // first, so each gateway's VIFs are already adjacent.
+  const gatewayGroups = tgw
+    ? columns.reduce<{ dxGatewayId: string; count: number }[]>((acc, c) => {
+      const id = c.dxGatewayId ?? '';
+      const last = acc[acc.length - 1];
+      if (last && last.dxGatewayId === id) last.count += 1;
+      else acc.push({ dxGatewayId: id, count: 1 });
+      return acc;
+    }, [])
+    : [];
 
   // Shared fate gets its OWN chips rather than joining `⚠ N`. It is a different
   // claim — ⚠ means "a prefix has no second path", ⚡/⚑ means "the second path
@@ -445,6 +565,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
         left: screenX,
         width: panelWidth,
         maxHeight: panelMaxHeight,
+        overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
         backgroundColor: light ? '#ffffff' : '#1a0f2e',
@@ -484,7 +605,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
         }}>
-          Route differences — {r(gatewayName)}
+          {tgw ? 'Route resilience' : 'Route differences'} — {r(gatewayName)}
         </span>
         <button
           onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose(); }}
@@ -778,7 +899,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
             // prefixes — no single row covers the whole query, so don't claim one.
             <>
               <Mono>{queryText}</Mono>
-              {` overlaps ${rangeMatches.length} prefix${rangeMatches.length === 1 ? '' : 'es'} on this gateway`}
+              {` overlaps ${rangeMatches.length} prefix${rangeMatches.length === 1 ? '' : 'es'} ${where}`}
               {query.isHost ? ', but none covers it entirely.' : '.'}
             </>
           ) : familyExcludesQuery ? (
@@ -791,7 +912,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
           ) : (
             <>
               {'No accepted prefix '}
-              {selectedVif ? <>on <strong>{r(selectedVif.label)}</strong> </> : 'on this gateway '}
+              {selectedVif ? <>on <strong>{r(selectedVif.label)}</strong> </> : `${where} `}
               {'covers '}<Mono>{queryText}</Mono>.
             </>
           )}
@@ -829,7 +950,7 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
             {` of ${visible.length} prefix${visible.length === 1 ? '' : 'es'} `}
             {selectedVif
               ? <>{'on '}<strong>{r(selectedVif.label)}</strong>{' cannot be reached from any other VIF'}</>
-              : 'on this gateway sit on a single VIF with no other path'}
+              : `${where} sit on a single VIF with no other path`}
             {'. If that VIF drops, the traffic has nowhere to go.'}
             {shownPartial > 0 && ` A further ${shownPartial} ${shownPartial === 1 ? 'is' : 'are'} only partly carried elsewhere (△).`}
           </>
@@ -850,7 +971,10 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
           // "Carried by two or more VIFs" full stop would be the false all-clear.
           `All ${visible.length} prefix${visible.length === 1 ? '' : 'es'} ${visible.length === 1 ? 'is' : 'are'} carried by two or more VIFs — but not by independent ones:`
         ) : (
-          `All ${visible.length} prefix${visible.length === 1 ? '' : 'es'} ${visible.length === 1 ? 'is' : 'are'} carried by two or more VIFs.`
+          `All ${visible.length} prefix${visible.length === 1 ? '' : 'es'} ${visible.length === 1 ? 'is' : 'are'} carried by two or more VIFs${
+            // Counted per VIF, so a prefix the TGW discards still passes here —
+            // say so, or this line reads as an all-clear beside the ⊘ banner.
+            tgw && rejectedCount > 0 ? `, but ${rejectedCount} of them ${rejectedCount === 1 ? 'is' : 'are'} rejected by the Transit Gateway (⊘ below).` : '.'}`
         )}
         {(shownSharedDevice > 0 || shownSharedSite > 0) && (
           <div style={{ paddingTop: 2 * z, color: warnColor, fontWeight: 600 }}>
@@ -878,6 +1002,67 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
           </div>
         )}
       </div>
+
+      {/* TGW mode: prefixes the TGW will never install. Its own note, kept to a
+          headline and one plain line: it shares the panel's height with the
+          routes, and a paragraph here pushed them out of view. The route list
+          below keeps room for six rows regardless. */}
+      {tgw && rejectedCount > 0 && (
+        <div
+          role="status"
+          style={{
+            padding: `${3 * z}px ${10 * z}px`,
+            borderBottom: `1px solid ${light ? '#e2e5ea' : 'rgba(139,92,246,0.15)'}`,
+            fontSize: `${7 * z}px`,
+            lineHeight: 1.35,
+            flexShrink: 0,
+            color: dangerColor,
+            backgroundColor: light ? 'rgba(185,28,28,0.06)' : 'rgba(185,28,28,0.14)',
+          }}
+          title={`BGP loop prevention: a router discards a route whose AS path already contains its own ASN. The VIFs accept ${rejectedCount === 1 ? 'this prefix' : 'these prefixes'}, but the TGW never installs ${rejectedCount === 1 ? 'it' : 'them'}.`}
+        >
+          <div style={{ fontWeight: 700 }}>
+            {`⊘ ${rejectedCount} prefix${rejectedCount === 1 ? '' : 'es'} rejected by this TGW`}
+          </div>
+          <div style={{ opacity: 0.85 }}>
+            {`AS path already contains the TGW's ASN ${tgw.asn} — likely an on-prem AS reusing it.`}
+          </div>
+        </div>
+      )}
+
+      {/* TGW mode: which DX gateway each run of VIF columns belongs to. The tab
+          bar names every VIF; this is the one thing it cannot show at a glance. */}
+      {tgw && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: `${3 * z}px ${10 * z}px 0`,
+          fontSize: `${6.5 * z}px`,
+          fontWeight: 700,
+          color: light ? '#7c3aed' : '#a78bfa',
+          flexShrink: 0,
+        }}>
+          <span style={{ width: indexColW + prefixColW, flexShrink: 0 }} />
+          {gatewayGroups.map((g) => (
+            <span
+              key={g.dxGatewayId}
+              style={{
+                width: g.count * (cellW + MARK_GAP * z),
+                flexShrink: 0,
+                textAlign: 'center' as const,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                borderBottom: `${Math.max(1, z)}px solid ${light ? 'rgba(124,58,237,0.35)' : 'rgba(167,139,250,0.35)'}`,
+                marginLeft: MARK_GAP * z,
+              }}
+              title={`DX gateway ${r(tgw.gatewayName(g.dxGatewayId))} (${r(g.dxGatewayId)}) — ${g.count} transit VIF${g.count === 1 ? '' : 's'}`}
+            >
+              {r(tgw.gatewayName(g.dxGatewayId))}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Column headers — one per VIF, numbered to match the tab bar. Names on
           one gateway share prefixes and suffixes, so no abbreviation is safe, and
@@ -923,11 +1108,29 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
             </span>
           );
         })}
+        {tgw && (
+          <span style={{ width: gradeColW, flexShrink: 0, paddingLeft: 8 * z }}>{GRADE_COL}</span>
+        )}
+        {showVia && (
+          <span
+            style={{ width: viaColW, flexShrink: 0 }}
+            title="The DX gateway the TGW route table forwards this prefix to now. AWS installs only the preferred route — backups appear only after it is withdrawn — so redundancy comes from the VIF columns, not from this one."
+          >
+            {VIA_COL}
+          </span>
+        )}
         <span style={{ width: SCROLLBAR_W * z, flexShrink: 0 }} aria-hidden="true" />
       </div>
 
       {/* Matrix rows */}
-      <div style={{ overflowY: 'auto', padding: `${6 * z}px ${10 * z}px` }}>
+      {/* The routes are what the panel is for, so they keep room for ten rows
+          however much the strips above grow; the legend below gives way first. */}
+      <div style={{
+        overflowY: 'auto',
+        padding: `${6 * z}px ${10 * z}px`,
+        flex: '1 1 auto',
+        minHeight: Math.min(Math.max(visible.length, 1), 10) * (ROW_H + 2) * z + 12 * z,
+      }}>
         {visible.length === 0 ? (
           <span style={{ color: light ? '#64748b' : '#94a3b8' }}>
             {scoped.length === 0 ? 'No accepted routes' : 'No prefixes match this filter'}
@@ -948,10 +1151,27 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                   .filter(Boolean)
                   .join(', ')
                 : '';
+              const isPicked = pickedCidr === row.cidr;
+              const grade = gradeOf.get(row.cidr);
+              const via = showVia ? viaOf(row.cidr) : undefined;
+              const togglePick = () => setPickedCidr(isPicked ? null : row.cidr);
               return (
                 <div
                   key={row.cidr}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={isPicked}
+                  onClick={(e) => { e.stopPropagation(); togglePick(); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); togglePick(); }
+                  }}
+                  // aria-label, not title: the cells inside carry their own tooltips,
+                  // and a row-level one would shadow them on hover.
+                  aria-label={isPicked ? `Clear the path highlight for ${r(row.cidr)}` : `Highlight the path${tgw ? 's into this Transit Gateway' : ''} for ${r(row.cidr)}`}
                   style={{
+                    cursor: 'pointer',
+                    outline: isPicked ? `${Math.max(1.5, 1.5 * z)}px solid ${light ? '#2563eb' : '#60a5fa'}` : undefined,
+                    outlineOffset: -1,
                     display: 'flex',
                     alignItems: 'center',
                     borderRadius: 4 * z,
@@ -1058,7 +1278,14 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                     // to learn two keys for one dataset. They differ by OUTLINE, not
                     // fill: the old `~`/`◐`/`·` set leaned on colour, and `·` was a
                     // period doing a glyph's job at 6.5px.
-                    const mark = cell?.state === 'exact'
+                    // TGW mode: a copy the TGW discards (its AS path holds the TGW's
+                    // ASN) is accepted on the VIF but is not a path into the TGW.
+                    const rejectedCopy = !!tgw?.isRejected && !!cell
+                      && (cell.state === 'exact' || cell.state === 'covered')
+                      && tgw.isRejected(c.vifId, cell.state === 'covered' ? cell.via! : row.cidr);
+                    const mark = rejectedCopy
+                      ? '⊘'
+                      : cell?.state === 'exact'
                       ? '✓'
                       : cell?.state === 'covered'
                         ? '○'
@@ -1077,7 +1304,9 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                     // it only meant "not in this comparison". The per-cell tooltip
                     // below still names the shared domain — that part IS per column.
                     const isFateCarrier = !!fate && scopedIn && fate.vifIds.includes(c.vifId);
-                    const baseColor = cell?.state === 'exact'
+                    const baseColor = rejectedCopy
+                      ? dangerColor
+                      : cell?.state === 'exact'
                       ? okColor
                       : cell?.state === 'covered'
                         ? coveredColor
@@ -1095,7 +1324,9 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                       ? ` — but so do all the other carriers, from the same ${
                         fate!.scope === 'device' ? `logical device ${r(fate!.id)}` : `DX location ${r(fate!.id)}`}`
                       : '';
-                    const title = cell?.state === 'exact'
+                    const title = rejectedCopy
+                      ? `${r(c.label)} accepts ${r(cell!.state === 'covered' ? cell!.via! : row.cidr)}, but its AS path already contains this Transit Gateway's ASN ${tgw!.asn} — the TGW discards this copy (BGP loop prevention)${scopeNote}`
+                      : cell?.state === 'exact'
                       ? `${r(c.label)} accepts ${r(row.cidr)}${fateNoteCell}${scopeNote}`
                       : cell?.state === 'covered'
                         ? `${r(c.label)} does not have ${r(row.cidr)}, but covers it via ${r(cell.via!)}${scopeNote}`
@@ -1121,6 +1352,69 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
                       </span>
                     );
                   })}
+                  {tgw && grade && (
+                    <span
+                      style={{
+                        width: gradeColW,
+                        flexShrink: 0,
+                        paddingLeft: 8 * z,
+                        fontSize: `${7.5 * z}px`,
+                        fontWeight: 700,
+                        whiteSpace: 'nowrap',
+                        color: gradeColor(grade),
+                      }}
+                      title={GRADE_TITLE[grade]}
+                    >
+                      {GRADE_LABEL[grade]}
+                    </span>
+                  )}
+                  {via && (
+                    <span
+                      style={{
+                        width: viaColW,
+                        flexShrink: 0,
+                        fontSize: `${7.5 * z}px`,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        color: via.state === 'missing' || (via.state === 'found' && via.blackhole)
+                          ? dangerColor
+                          : tgw?.mismatchedCidrs?.has(row.cidr)
+                            ? warnColor
+                            : (light ? '#334155' : '#cbd5e1'),
+                        fontWeight: via.state === 'missing' ? 700 : undefined,
+                      }}
+                      title={via.state === 'missing'
+                        ? (grade === 'rejected'
+                          ? `Not installed: every copy's AS path contains this TGW's ASN ${tgw!.asn}, so the TGW discards them (BGP loop prevention). Something on-premises is using the same ASN.`
+                          : `Accepted on the VIFs but in none of this TGW's ${via.tableCount} route table${via.tableCount === 1 ? '' : 's'} — check that the DX gateway attachment propagates into them.`)
+                        : via.state === 'found'
+                          ? [
+                            via.dxGatewayIds.length
+                              ? `Forwarded to ${via.dxGatewayIds.map((id) => r(tgw!.gatewayName(id))).join(', ')}`
+                              : '',
+                            via.other.length
+                              ? `Installed against ${via.other.map((o) => `${o.type} ${o.resourceType} ${r(o.resourceId)}`).join(', ')} instead of a DX gateway`
+                              : '',
+                            via.blackhole ? 'Blackhole route — traffic to it is dropped' : '',
+                            `In ${via.foundIn} of ${via.tableCount} route table${via.tableCount === 1 ? '' : 's'}.`,
+                            via.staticDxGatewayIds.length ? 'A static route forwards whatever BGP says, so the AS-loop check does not apply to it.' : '',
+                            tgw?.mismatchedCidrs?.has(row.cidr) ? 'Every VIF copy reads as rejected, yet the TGW has it installed — the two were read at different moments. Refresh.' : '',
+                          ].filter(Boolean).join('. ')
+                          : undefined}
+                    >
+                      {via.state === 'missing'
+                        ? '✖ not in TGW'
+                        : via.state === 'found'
+                          ? (via.blackhole
+                            ? '✖ blackhole'
+                            : [
+                              ...via.dxGatewayIds.map((id) => (via.staticDxGatewayIds.includes(id) ? 'static → ' : '') + r(tgw!.gatewayName(id))),
+                              ...via.other.map((o) => o.resourceType),
+                            ].join(', ') || '—')
+                          : null}
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -1136,13 +1430,16 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
         fontSize: `${6.5 * z}px`,
         lineHeight: 1.5,
         color: light ? '#94a3b8' : '#64748b',
-        flexShrink: 0,
+        flexShrink: 1,
+        minHeight: 0,
+        overflowY: 'auto',
       }}>
         <div style={{ display: 'flex', gap: 8 * z, flexWrap: 'wrap' as const }}>
           <span><strong style={{ color: okColor }}>✓</strong> accepts this prefix</span>
           <span><strong style={{ color: coveredColor }}>○</strong> covered by a less specific route</span>
           <span><strong style={{ color: dangerColor }}>△</strong> only part of the block</span>
           <span><strong style={{ color: absentColor }}>×</strong> not reachable</span>
+          {tgw && <span><strong style={{ color: dangerColor }}>⊘</strong> rejected by the TGW (AS loop)</span>}
           <span><strong style={{ color: warnColor }}>⚡</strong> all carriers, one device</span>
           <span><strong style={{ color: warnColor }}>⚑</strong> all carriers, one site</span>
         </div>
@@ -1159,7 +1456,13 @@ export function DxgwRouteDiffPanel({ diff, gatewayName, onClose, nodeId, dxGatew
             the tab bar already names whichever stage is active and updates live,
             which a static footer sentence cannot beat. */}
         <div style={{ paddingTop: 2 * z }}>
-          Columns are VIFs. Accepted routes only (on-premises → AWS).
+          {tgw
+            ? <>Columns are transit VIFs, grouped by DX gateway; the grade is what each prefix survives across all of them. {tgw.asn != null
+              ? `Copies whose AS path contains this TGW's ASN ${tgw.asn} are not counted — the TGW discards them.`
+              : tgw.foreignOwner
+                ? `This TGW is owned by account ${r(tgw.foreignOwner)}, so its route table and ASN are not readable here (AS-loop rejection not checked) — add it as a spoke account at sign-in.`
+                : "This TGW's ASN is not readable from this account, so AS-loop rejection is not checked."} Click a row to light its path. Accepted routes only (on-premises → AWS).</>
+            : <>Columns are VIFs. Click a row to light its path. Accepted routes only (on-premises → AWS).</>}
         </div>
 
         {/* Closing disclaimer. Unconditional and last: the notes above name the

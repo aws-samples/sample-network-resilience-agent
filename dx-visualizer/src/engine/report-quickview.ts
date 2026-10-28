@@ -30,9 +30,11 @@
  */
 
 import type { TopologyData } from '../types/topology';
-import type { CombinedAssessment, ResiliencyLevel } from '../types/recommendations';
+import type { CombinedAssessment, ResiliencyLevel, TgwAssessment } from '../types/recommendations';
 import type { BgpSessionStability, DxConnection, DxVirtualInterface } from '../types/aws-resources';
 import { computeDxgwRouteDiff } from './vif-route-diff';
+import { assessTgwRouteResilience } from './tgw-route-resilience';
+import { groupTgwsByFeeders } from './recommendation-engine';
 import { acceptedByFamily, prefixQuotaFor, PREFIX_UTILIZATION_WARN } from './bestpractice-rules';
 
 /** Column identity. Order here is the column order in the report. */
@@ -121,7 +123,8 @@ export interface QuickViewTier {
 
 export interface QuickViewRow {
   key: string;
-  kind: 'dxgw' | 'other' | 'total';
+  /** `tgw` — a Transit Gateway, graded over every transit VIF of the DX gateways feeding it. */
+  kind: 'dxgw' | 'tgw' | 'other' | 'total';
   label: string;
   sublabel: string;
   /** Gateway id for rows that have one, so the renderer can resolve its anchor. */
@@ -611,6 +614,12 @@ export function buildQuickView(
 
   const connById = new Map(topology.connections.map((c) => [c.connectionId, c]));
   const rows: QuickViewRow[] = [];
+  const tgwById = new Map((assessment.perTgw ?? []).map((t) => [t.tgwId, t]));
+  const weakestTgwFor = (ids: string[] | undefined): TgwAssessment | undefined =>
+    (ids ?? [])
+      .map((id) => tgwById.get(id))
+      .filter((t): t is TgwAssessment => !!t)
+      .reduce<TgwAssessment | undefined>((w, t) => (!w || TIER_RANK[t.currentLevel] < TIER_RANK[w.currentLevel] ? t : w), undefined);
 
   const vifsFor = (predicate: (v: DxVirtualInterface) => boolean) =>
     topology.virtualInterfaces.filter(predicate);
@@ -623,7 +632,7 @@ export function buildQuickView(
 
   const buildRow = (
     key: string,
-    kind: 'dxgw' | 'other',
+    kind: 'dxgw' | 'tgw' | 'other',
     label: string,
     sublabel: string,
     targetId: string | undefined,
@@ -695,8 +704,33 @@ export function buildQuickView(
     }
 
     // --- prefixes with one path ---
+    const tgwRes = kind === 'tgw' && targetId
+      ? assessTgwRouteResilience(topology, targetId, tgwById.get(targetId)?.dxGatewayIds ?? [])
+      : null;
     const diff = targetId && kind === 'dxgw' ? computeDxgwRouteDiff(topology, targetId) : null;
-    if (!diff) {
+    if (kind === 'tgw') {
+      // A TGW's single-path prefixes come from its route-resilience grades, which
+      // already discount copies the TGW rejects (AS loop) — a per-VIF count would
+      // call a looped prefix "redundant" because two VIFs accept it.
+      if (!tgwRes) {
+        cells.set('soloPrefixes', na(topology.vifRoutes ? 'fewer than two transit VIFs with routes' : 'BGP routes not fetched'));
+      } else {
+        const gaps = tgwRes.counts.none + tgwRes.counts.partial + tgwRes.counts.rejected;
+        cells.set('soloPrefixes', {
+          figure: `${gaps} of ${tgwRes.rows.length}`,
+          detail: gaps === 0
+            ? 'every prefix has a second path'
+            : [
+              tgwRes.counts.none ? `${tgwRes.counts.none} no backup` : '',
+              tgwRes.counts.partial ? `${tgwRes.counts.partial} partly covered` : '',
+              tgwRes.counts.rejected ? `${tgwRes.counts.rejected} rejected (AS loop)` : '',
+            ].filter(Boolean).join(', '),
+          severity: gaps === 0 ? 'ok' : 'warning',
+          section: 'route-analysis',
+          focusIds: [targetId!],
+        });
+      }
+    } else if (!diff) {
       cells.set(
         'soloPrefixes',
         na(topology.vifRoutes ? 'no BGP routes on this gateway' : 'BGP routes not fetched'),
@@ -736,7 +770,25 @@ export function buildQuickView(
     };
   };
 
+  // Transit Gateways first: a DX gateway that connects to a TGW is only a hop, so
+  // its traffic is graded on the TGW's row (every transit VIF reaching it), and it
+  // gets no row of its own. TGWs fed by the same gateways share one row.
+  for (const group of groupTgwsByFeeders(assessment.perTgw ?? [])) {
+    const lead = group[0];
+    const feeders = new Set(lead.dxGatewayIds);
+    rows.push(buildRow(
+      `tgw:${lead.tgwId}`,
+      'tgw',
+      group.map((t) => t.tgwName).join(', '),
+      group.map((t) => t.tgwId).join(', '),
+      lead.tgwId,
+      vifsFor((v) => v.virtualInterfaceType === 'transit' && !!v.directConnectGatewayId && feeders.has(v.directConnectGatewayId)),
+      { current: lead.currentLevel, target: lead.targetLevel },
+    ));
+  }
+
   for (const gw of gateways) {
+    if (gw.assessedAtTgwIds) continue; // graded on its TGW's row above
     const vifs = vifsFor((v) => v.directConnectGatewayId === gw.dxGatewayId);
     rows.push(
       buildRow(
@@ -874,7 +926,11 @@ export function buildQuickView(
   // The estate's tier is the WEAKEST gateway, not an average: the account is only as
   // resilient as its most exposed path, and a mean would let three Maximum gateways
   // hide a Dev & Test one. The tally beside it says how many sit where.
-  const levels: ResiliencyLevel[] = gateways.filter((g) => !g.isUnattached).map((g) => g.currentLevel);
+  // Transit gateways contribute their TGWs' tiers instead of their own, once per TGW.
+  const levels: ResiliencyLevel[] = [
+    ...gateways.filter((g) => !g.isUnattached && !weakestTgwFor(g.assessedAtTgwIds)).map((g) => g.currentLevel),
+    ...(assessment.perTgw ?? []).map((t) => t.currentLevel),
+  ];
   let totalTier: QuickViewTier;
   if (levels.length === 0) {
     totalTier = noTier(gateways.length ? 'no gateway carries a VIF' : 'no DX gateways');
@@ -895,7 +951,9 @@ export function buildQuickView(
     };
   }
 
-  const gwCount = gateways.length;
+  // Counted as the rows show them: TGWs for transit, DX gateways for the rest.
+  const tgwCount = (assessment.perTgw ?? []).length;
+  const gwCount = gateways.filter((g) => !g.assessedAtTgwIds).length;
   const vgwCount = new Set(
     orphans.map((v) => v.directConnectGatewayId).filter((id): id is string => !!id),
   ).size;
@@ -904,7 +962,8 @@ export function buildQuickView(
     kind: 'total',
     label: 'Account total',
     sublabel: [
-      `${gwCount} DX gateway${gwCount === 1 ? '' : 's'}`,
+      tgwCount ? `${tgwCount} Transit Gateway${tgwCount === 1 ? '' : 's'}` : null,
+      gwCount ? `${gwCount} DX gateway${gwCount === 1 ? '' : 's'}` : null,
       vgwCount ? `${vgwCount} VGW` : null,
       `${allLocations.length} location${allLocations.length === 1 ? '' : 's'}`,
     ].filter(Boolean).join(' · '),

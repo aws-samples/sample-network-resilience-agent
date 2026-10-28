@@ -1,18 +1,22 @@
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData, HiddenAssocChildInfo } from '../../types/topology';
 import { useTopologyStore } from '../../store/topology-store';
+import { dimOpacityFor } from '../../utils/constants';
+import { useRecPathMuted } from './useRecPathMuted';
 
 // Renders DXGW associations whose associated gateway identity AWS refuses
 // to expose via the public API (prefix-pool / EDGLESS origin). Structurally
 // modelled on UnattachedZoneNode — collapsible header + inline table, same
 // neutral palette so it reads as part of the canvas, not an alert.
-export function HiddenAssocZoneNode({ data }: NodeProps) {
+export function HiddenAssocZoneNode({ id, data }: NodeProps) {
   const d = data as DxNodeData;
   const theme = useTopologyStore((s) => s.theme);
   const isLocked = useTopologyStore((s) => s.isLocked);
   const expanded = useTopologyStore((s) => s.expandedHiddenAssocZone);
   const toggleExpanded = useTopologyStore((s) => s.toggleHiddenAssocZone);
   const light = theme === 'light';
+  const isRecPathMuted = useRecPathMuted(id);
+  const recPathOpacity = isRecPathMuted ? dimOpacityFor('node', light) : undefined;
 
   const rows = (d.hiddenAssocChildren as HiddenAssocChildInfo[] | undefined) ?? [];
   const total = rows.length;
@@ -42,6 +46,8 @@ export function HiddenAssocZoneNode({ data }: NodeProps) {
     <div
       className="rounded-xl pointer-events-none overflow-hidden"
       style={{
+        opacity: recPathOpacity ?? 1,
+        transition: 'opacity 0.15s',
         borderWidth: 1,
         borderStyle: 'solid',
         borderColor: border,

@@ -9,7 +9,7 @@ The recommendation system has **two independent categories**:
 
 ## 1. Resiliency rules
 
-**12 `ruleId`s from 9 rule functions** — 6 functions in `resiliency-rules.ts`, 3 in `public-vif-rules.ts`. Every recommendation here is severity **Info** except `no-tgw` and `single-vgw`, which are **Warning**: a tier gap may be a deliberate product decision (a dev environment intentionally sitting on one connection), so it is never graded Critical. Observed faults are the best-practice rules' job.
+**14 `ruleId`s from 9 rule functions** — 6 functions in `resiliency-rules.ts`, 3 in `public-vif-rules.ts`. Every recommendation here is severity **Info** except `no-tgw` and `single-vgw`, which are **Warning**: a tier gap may be a deliberate product decision (a dev environment intentionally sitting on one connection), so it is never graded Critical. Observed faults are the best-practice rules' job.
 
 | Rule ID | Trigger | Recommendation | Signal |
 |---|---|---|---|
@@ -24,10 +24,15 @@ The recommendation system has **two independent categories**:
 | `pubvif-single-dx-location` | Public VIFs terminate at only 1 DX location | Add a second DX location for public VIF connectivity | `DescribeVirtualInterfaces` (public VIFs) + `DescribeConnections` grouping — only runs when public VIFs exist |
 | `pubvif-single-connection-per-location` | A public-VIF DX location has connections on only 1 device (Maximum target only) | Add a redundant connection on a separate device | `awsLogicalDeviceId` from `DescribeConnections` — only runs when public VIFs exist |
 | `pubvif-carried-max-gap` | A public VIF rides the same connection as a DX Gateway whose target tier is higher, so the shared carrier is upgraded past the public VIF's own tier | Surfaces the gap so the public endpoint path is assessed at the tier its carrier is actually being taken to | Carrier correlation between public VIFs and DXGW-scoped connections |
+| `tgw-single-transit-vif` | Only one transit VIF reaches this **Transit Gateway**, across every DX gateway associated to it | Add a transit VIF from a second DX location (text only — no ghost) | `DescribeDirectConnectGatewayAssociations` (TGW target) + transit VIFs on those gateways |
+| `tgw-single-dx-location` | Two or more transit VIFs reach the TGW, all at one DX location | Add a transit VIF from a second DX location (text only) | Same, grouped by location |
+| `tgw-single-device-per-location` | A location on the TGW's transit path has one AWS logical device (**Maximum target only**) | Add a connection on a separate device (text only) | `awsLogicalDeviceId` across the TGW's transit VIFs |
 
 The three `pubvif-*` rules run through a dedicated public-VIF assessment path and only apply when the topology has public virtual interfaces; their ghost overlays attach to the **public-endpoints** node rather than a DX Gateway.
 
 The `vgw-*` ids are not separate rules — a VGW reached over a private VIF has the same site/device redundancy posture as a DX Gateway, so the same two functions are re-run with `gatewayKind='vgw'` and only the ghost sink node id changes.
+
+The `tgw-*` ids grade a **Transit Gateway reached over transit VIFs**, over the union of every transit VIF reaching it across all its DX gateways — a transit VIF's DX gateway is only a hop, and two single-site gateways at different sites jointly make one TGW site-redundant. They carry **no ghost nodes**: the fix is drawn by the feeding gateways' own `single-dx-location` / `single-connection-per-location` recommendations, so drawing it again would double every path. For the same reason they live on `perTgw` only and are **not** folded into the aggregated `resiliency` list or the report's findings totals. A transit gateway's own card states no tier — it points at the TGW card (`assessedAtTgwIds`). TGWs fed by the same gateways share one card (`groupTgwsByFeeders`). Emitted by `ruleTgwResiliency`.
 
 > **Where these rules' text appears:** on the canvas these rules manifest **only** as green ghost infrastructure. Their `title`/`description` strings are not rendered in the app UI — they reach the user through the HTML report's "How to improve resiliency" section and the chat system prompt.
 

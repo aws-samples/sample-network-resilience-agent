@@ -312,6 +312,33 @@ export const RULE_META: Record<string, RuleMeta> = {
     changeType: 'practice',
     isPass: true,
   },
+  // Transit Gateway scope: the same site/device gaps as the per-gateway rules,
+  // stated over every transit VIF reaching one TGW. Same fix, same lead time.
+  'tgw-single-transit-vif': {
+    publishedId: 'DX-ARC-24',
+    category: 'architecture',
+    // One VIF is one connection, one device and one site — every failure mode at once.
+    impact: 'critical',
+    effort: 'high',
+    leadTime: 'weeks',
+    changeType: 'procurement',
+  },
+  'tgw-single-dx-location': {
+    publishedId: 'DX-ARC-25',
+    category: 'architecture',
+    impact: 'critical',
+    effort: 'high',
+    leadTime: 'weeks',
+    changeType: 'procurement',
+  },
+  'tgw-single-device-per-location': {
+    publishedId: 'DX-ARC-26',
+    category: 'architecture',
+    impact: 'high',
+    effort: 'high',
+    leadTime: 'weeks',
+    changeType: 'procurement',
+  },
 
   // ── Configuration ───────────────────────────────────────────────────────────
   // Overwhelmingly `config` / low effort / hours. This is the bucket that fills

@@ -246,10 +246,12 @@ describe('LAG resiliency ghost shape (Rule 1)', () => {
     t.dxGateways = [{ directConnectGatewayId: 'gw1', directConnectGatewayName: 'GW1', amazonSideAsn: 64512, directConnectGatewayState: 'available' }];
 
     const nodes = ghostNodes(t);
-    // The redundant LocB is skipped; the ghost path lands on LocC.
-    const locs = devLocCodes(nodes);
-    expect(locs).not.toContain('LocB');
-    expect(locs).toContain('LocC');
+    // The redundant LocB is skipped. Maximum needs TWO device-redundant locations
+    // (the SLA), and LocB is one — so a second device at ONE of LocA / LocC closes
+    // it, not one at each.
+    const locs = new Set(devLocCodes(nodes));
+    expect(locs.has('LocB')).toBe(false);
+    expect([locs.has('LocA'), locs.has('LocC')].filter(Boolean)).toHaveLength(1);
   });
 
   it('does NOT invent a LAG ghost when there is no other existing sink-connected location', () => {

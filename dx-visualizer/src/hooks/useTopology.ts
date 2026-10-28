@@ -5,7 +5,8 @@ import { fetchAllTopologyData } from '../api/fetch-topology';
 import { resolveAccountName } from '../api/organizations';
 import { buildGraph } from '../engine/topology-builder';
 import { applyLayout } from '../engine/layout-engine';
-import { analyzeTopology, getRecommendedGraph } from '../engine/recommendation-engine';
+import { analyzeTopology, getRecommendedGraph, groupTgwsByFeeders, FOCUSED_PUBLIC_VIF } from '../engine/recommendation-engine';
+import type { CombinedAssessment } from '../types/recommendations';
 import { filterTopologyByTags, getTagMatchIds, scopeTagRecommendations } from '../engine/tag-filter';
 import type { DxNode, TopologyData } from '../types/topology';
 
@@ -153,12 +154,27 @@ function rebuildFromTopology() {
     const recNodeIds = new Set(recNodes.map((rn) => rn.id));
     const layoutCurrentForRec = tagOrphans(layoutAll.filter((n) => !recNodeIds.has(n.id)));
     const layoutRecNodes = layoutAll.filter((n) => recNodeIds.has(n.id));
-    setRecommendedGraph(layoutRecNodes, recEdges, layoutCurrentForRec);
+    setRecommendedGraph(layoutRecNodes, recEdges, layoutCurrentForRec, recPathSinkNodeIds(assessment, focusedDxGatewayId));
   } else {
-    setRecommendedGraph([], recEdges, tagOrphans(layoutNodes));
+    setRecommendedGraph([], recEdges, tagOrphans(layoutNodes), recPathSinkNodeIds(assessment, focusedDxGatewayId));
   }
 
   setAssessment(assessment);
+}
+
+/**
+ * The node(s) a focused card's recommended path ends at. A TGW card covers every
+ * TGW sharing its feeders (one card, one scope), so all of them light.
+ */
+function recPathSinkNodeIds(assessment: CombinedAssessment, focus: string | null): string[] {
+  if (focus == null) return [];
+  if (focus === FOCUSED_PUBLIC_VIF) return ['pub-endpoints'];
+  if (focus.startsWith('vgw-')) return [`vgw-${focus}`];
+  if (focus.startsWith('tgw-')) {
+    const group = groupTgwsByFeeders(assessment.perTgw ?? []).find((g) => g.some((t) => t.tgwId === focus));
+    return (group ?? [{ tgwId: focus }]).map((t) => `tgw-${t.tgwId}`);
+  }
+  return [`dxgw-${focus}`];
 }
 
 export function useTopology() {
