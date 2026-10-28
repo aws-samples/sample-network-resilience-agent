@@ -271,11 +271,11 @@ describe('links per site (conn·dev) chips', () => {
   });
 
   it('gives the account total its own chips rather than reusing a gateway row', () => {
-    // `high` puts four EqSG2 links on one device but only two of them reach any one
-    // gateway, so the two rows must differ.
+    // `high` puts four EqSG2 links on one device but only two of them are transit
+    // VIFs reaching the TGW row, so the two rows must differ.
     const qv = view('high');
     expect(shape(cell(totalRow(qv.rows), 'locations'))).toContain('EqSG2 4·1 [weak]');
-    const gw = qv.rows.find((r) => r.kind === 'dxgw');
+    const gw = qv.rows.find((r) => r.kind === 'tgw');
     expect(shape(cell(gw!, 'locations'))).toContain('EqSG2 2·1 [weak]');
   });
 

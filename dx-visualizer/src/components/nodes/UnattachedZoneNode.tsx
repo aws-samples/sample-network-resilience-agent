@@ -1,9 +1,11 @@
 import type { NodeProps } from '@xyflow/react';
 import type { DxNodeData, VpcChildInfo, TgwChildInfo, VgwChildInfo, DxgwChildInfo } from '../../types/topology';
 import { useTopologyStore } from '../../store/topology-store';
+import { dimOpacityFor } from '../../utils/constants';
+import { useRecPathMuted } from './useRecPathMuted';
 import { useRedact } from '../../utils/redact';
 
-export function UnattachedZoneNode({ data }: NodeProps) {
+export function UnattachedZoneNode({ id, data }: NodeProps) {
   const d = data as DxNodeData;
   const r = useRedact();
   const theme = useTopologyStore((s) => s.theme);
@@ -11,6 +13,8 @@ export function UnattachedZoneNode({ data }: NodeProps) {
   const expanded = useTopologyStore((s) => s.expandedUnattachedZone);
   const toggleExpanded = useTopologyStore((s) => s.toggleUnattachedZone);
   const light = theme === 'light';
+  const isRecPathMuted = useRecPathMuted(id);
+  const recPathOpacity = isRecPathMuted ? dimOpacityFor('node', light) : undefined;
 
   const vpcChildren = (d.vpcChildren as VpcChildInfo[] | undefined) ?? [];
   const tgwChildren = (d.tgwChildren as TgwChildInfo[] | undefined) ?? [];
@@ -51,6 +55,8 @@ export function UnattachedZoneNode({ data }: NodeProps) {
     <div
       className="rounded-xl pointer-events-none overflow-hidden"
       style={{
+        opacity: recPathOpacity ?? 1,
+        transition: 'opacity 0.15s',
         borderWidth: 1,
         borderStyle: 'solid',
         borderColor: border,

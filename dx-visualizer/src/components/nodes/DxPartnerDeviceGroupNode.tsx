@@ -4,6 +4,7 @@ import type { DxNodeData } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
 import { dimOpacityFor } from '../../utils/constants';
 import { useTopologyStore } from '../../store/topology-store';
+import { useRecPathMuted } from './useRecPathMuted';
 import { CustomerGatewayIcon } from './aws-icons';
 
 export function DxPartnerDeviceGroupNode({ data, id }: NodeProps) {
@@ -14,7 +15,8 @@ export function DxPartnerDeviceGroupNode({ data, id }: NodeProps) {
   const highlightedNodeIds = useTopologyStore((s) => s.highlightedNodeIds);
   const hasHoverActive = hoveredNodeId != null;
   const isOnHoverPath = hasHoverActive && highlightedNodeIds.has(id);
-  const isDimmed = hasHoverActive && !isOnHoverPath;
+  const isRecPathMuted = useRecPathMuted(id);
+  const isDimmed = (hasHoverActive && !isOnHoverPath) || isRecPathMuted;
 
   const groupKey = id;
   const bg = theme === 'light' ? COLORS.light.nodeBg : '#1e1033';

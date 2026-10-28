@@ -2,10 +2,11 @@ import { useCallback } from 'react';
 import { useTopologyStore } from '../store/topology-store';
 import type { TopologyData } from '../types/topology';
 import type { DxConnection, DxVirtualInterface, VifRoute } from '../types/aws-resources';
-import type { CombinedAssessment, Recommendation, ResiliencyLevel } from '../types/recommendations';
-import { getLocationDeviceCounts, getLocationLinkCounts } from '../engine/sla-gating';
+import type { CombinedAssessment, Recommendation, ResiliencyLevel, TgwAssessment } from '../types/recommendations';
+import { getLocationDeviceCounts, getLocationLinkCounts, meetsMaximumTier, maximumTierGapLocations } from '../engine/sla-gating';
 import { summariseIssues, guidanceFor } from '../utils/fetch-issues';
-import { analyzeTopology } from '../engine/recommendation-engine';
+import { analyzeTopology, groupTgwsByFeeders } from '../engine/recommendation-engine';
+import { assessTgwRouteResilience, type PrefixGrade } from '../engine/tgw-route-resilience';
 import {
   computeDxgwRouteDiff,
   uniqueByCidr,
@@ -488,7 +489,8 @@ type TopologyStats = ReturnType<typeof collectTopologyStats>;
 type UpgradeOption = { level: ResiliencyLevel; step: string };
 
 function upgradeOptionsFor(level: ResiliencyLevel, stats: TopologyStats): UpgradeOption[] {
-  const underprovisioned = [...stats.locationConns.entries()].filter(([, c]) => c < 2).map(([loc]) => loc);
+  // Only the locations that stand between this scope and two device-redundant ones.
+  const underprovisioned = maximumTierGapLocations(stats.locationConns);
 
   if (level === 'none') {
     return [
@@ -499,7 +501,11 @@ function upgradeOptionsFor(level: ResiliencyLevel, stats: TopologyStats): Upgrad
   if (level === 'devtest') {
     return [
       { level: 'high', step: 'Add a connection at a second location.' },
-      { level: 'maximum', step: 'Add a second location with 2 connections.' },
+      // A single-device site needs its own second device too (Maximum is two
+      // locations with two devices each).
+      { level: 'maximum', step: underprovisioned.length > 0
+        ? `Add a second location with 2 connections, and a connection on a separate AWS logical device at ${underprovisioned[0]}.`
+        : 'Add a second location with 2 connections.' },
     ];
   }
   if (level === 'high') {
@@ -524,25 +530,25 @@ function nextStepsFor(level: ResiliencyLevel, stats: TopologyStats, subject?: st
   const subjHas = subject ? `${subject} has` : 'You have';
   const locCount = stats.locationConns.size;
   const locName = locCount === 1 ? [...stats.locationConns.keys()][0] : '';
-  const underprovisioned = [...stats.locationConns.entries()].filter(([, c]) => c < 2).map(([loc]) => loc);
+  const underprovisioned = maximumTierGapLocations(stats.locationConns);
 
   switch (level) {
     case 'none':
       steps.push('Provision at least one Direct Connect connection to begin.');
       steps.push('A single connection is covered by the AWS Single Connection SLA (95%) — add a connection at a second DX location to reach High Resiliency (99.9% SLA).');
-      steps.push('Add a second connection at each location to reach Maximum Resiliency (99.99% SLA).');
+      steps.push('Add a second connection on a separate device at each of two locations to reach Maximum Resiliency (99.99% SLA).');
       break;
     case 'devtest':
       steps.push(`${subj} terminates at a single Direct Connect location${locName ? ` (${locName})` : ''}, covered by the Single Connection SLA (95%). Add Direct Connect connections at a second location to protect against a location-wide outage.`);
       steps.push('The High Resiliency tier qualifies for the 99.9% connection SLA.');
-      steps.push('Final step: ensure each location has at least 2 connections on separate devices to reach Maximum Resiliency (99.99% SLA).');
+      steps.push('Final step: have at least 2 connections on separate devices at each of two locations to reach Maximum Resiliency (99.99% SLA).');
       break;
     case 'high':
-      steps.push(`${subjHas} connections at ${locCount} locations. To reach Maximum Resiliency, each location needs at least 2 connections terminating on separate AWS logical devices.`);
+      steps.push(`${subjHas} connections at ${locCount} locations. Maximum Resiliency needs two of those locations to each have at least 2 connections terminating on separate AWS logical devices.`);
       if (underprovisioned.length > 0) {
-        steps.push(`Locations still on a single AWS logical device: ${underprovisioned.join(', ')}. Add a connection on a separate device at each of these (multiple connections sharing one device don't provide device redundancy).`);
+        steps.push(`Add a connection on a separate device at ${underprovisioned.join(' and ')} (multiple connections sharing one device don't provide device redundancy).`);
       }
-      steps.push('Once every location has at least 2 connections on separate AWS logical devices, you qualify for the 99.99% Direct Connect SLA.');
+      steps.push('With two locations each on at least 2 separate AWS logical devices, you qualify for the 99.99% Direct Connect SLA.');
       break;
     case 'maximum':
       steps.push(`${subj} is at the highest tier (Maximum Resiliency, 99.99% SLA).`);
@@ -655,13 +661,13 @@ const REFERENCE_ITEMS: ReferenceItem[] = [
     },
   },
   {
-    title: 'Two connections per location on separate DX devices',
-    detail: 'Protects against hardware failure at a single location. Required for the 99.99% Direct Connect SLA.',
+    title: 'Two connections on separate DX devices at two or more locations',
+    detail: 'Protects against hardware failure at a location. Two such locations are required for the 99.99% Direct Connect SLA.',
     category: 'architecture',
     classify: (s) => {
       if (s.locationConns.size === 0) return { status: 'attest' };
       const entries = [...s.locationConns.entries()].sort();
-      if (!entries.every(([, c]) => c >= 2)) return { status: 'gap' };
+      if (!meetsMaximumTier(entries.map(([, c]) => c))) return { status: 'gap' };
       return { status: 'applied', evidence: entries.map(([loc, c]) => `${loc}: ${c} AWS logical devices`) };
     },
   },
@@ -788,9 +794,15 @@ function renderExecutiveSummary(
 ): string {
   type Scope = { name: string; level: ResiliencyLevel; dxgwId?: string };
   const scopes: Scope[] = [
+    // A transit gateway's tier is stated at its Transit Gateway, so it is a scope
+    // only through the TGW group below — counting it here too would tier one path twice.
     ...assessment.perDxGateway
-      .filter((g) => !g.isUnattached)
+      .filter((g) => !g.isUnattached && !g.assessedAtTgwIds)
       .map((g) => ({ name: g.dxGatewayName || g.dxGatewayId, level: g.currentLevel, dxgwId: g.dxGatewayId })),
+    ...groupTgwsByFeeders(assessment.perTgw ?? []).map((group) => ({
+      name: group.map((t) => t.tgwName).join(', '),
+      level: group[0].currentLevel,
+    })),
     ...(assessment.perVgw ?? []).map((v) => ({ name: v.vgwName || v.vgwId, level: v.currentLevel })),
   ];
 
@@ -806,7 +818,7 @@ function renderExecutiveSummary(
   ].join(', ');
 
   const posture = scopes.length === 0
-    ? `<p>No Direct Connect gateway or DX-reached virtual private gateway was found, so there is no scope to tier.</p>`
+    ? `<p>No Direct Connect gateway, DX-reached Transit Gateway or DX-reached virtual private gateway was found, so there is no scope to tier.</p>`
     : tiersPresent.length === 1
       ? `<p>${scopes.length === 1 ? 'The single assessed scope sits' : `All ${scopes.length} assessed scopes sit`} at <strong>${TIER_LABELS[tiersPresent[0]]}</strong> — ${escapeHtml(TIER_SLA[tiersPresent[0]])}.</p>`
       : `<p><strong>Resilience is uneven across scopes, so there is no single figure for this
@@ -1173,11 +1185,11 @@ function renderQuickViewChips(chips: QuickViewChip[]): string {
 function renderQuickViewCell(
   cell: QuickViewCell,
   numeric: boolean,
-  gwNavIds: Map<string, string>,
   targetId: string | undefined,
   columnId: QuickViewColumnId,
   /** Gateway id → anchor of the first flagged row in its route-diff matrix. */
   gwPrefixAnchors: Map<string, string>,
+  rowNav: QuickViewRowNav | undefined,
 ): string {
   const body = `<span class="qv-fig">${escapeHtml(cell.figure)}</span>${
     cell.chips?.length
@@ -1190,17 +1202,16 @@ function renderQuickViewCell(
   // Landing the reader on the card's heading and making them scan for the table that
   // backs the figure they clicked is the same work they came here to avoid.
   if (cell.section === 'gateway' || cell.section === 'gateway-posture' || cell.section === 'gateway-vifs') {
-    const nav = targetId ? gwNavIds.get(targetId) : undefined;
-    const suffix = cell.section === 'gateway-posture'
-      ? '-posture'
-      : cell.section === 'gateway-vifs' ? '-vifs' : '';
-    href = nav ? `#${nav}${suffix}` : '#per-dx-gateway';
+    href = rowNav
+      ? `#${cell.section === 'gateway-posture' ? rowNav.posture
+        : cell.section === 'gateway-vifs' ? rowNav.vifs : rowNav.nav}`
+      : '#per-dx-gateway';
   } else if (cell.section === 'route-analysis') {
     // "3 of 223 · 3 solo" lands on the first prefix it counted, not on a section
     // heading — the reader's next question is *which* prefix, and the matrix is
     // ordered worst-first so that row is the top one. Only the prefix column: the
     // quota column counts VIFs, whose rows are the gateway's VIF inventory.
-    const prefixRow = columnId === 'soloPrefixes' && targetId
+    const prefixRow = columnId === 'soloPrefixes' && targetId && rowNav?.kind === 'dxgw'
       ? gwPrefixAnchors.get(targetId)
       : undefined;
     if (prefixRow) {
@@ -1210,8 +1221,7 @@ function renderQuickViewCell(
       // prefix falls back to its own gateway rather than to an estate-wide section
       // that no longer exists. The account-total row has no gateway, hence the
       // section heading as the last resort.
-      const nav = targetId ? gwNavIds.get(targetId) : undefined;
-      href = nav ? `#${nav}-prefix` : '#per-dx-gateway';
+      href = rowNav ? `#${rowNav.prefix}` : '#per-dx-gateway';
     }
   } else if (cell.section === 'inventory') {
     href = '#inventory';
@@ -1239,7 +1249,7 @@ function renderQuickViewCell(
  * unfinished. The badges use `TIER_BADGE_COLOR`, the same palette the gateway cards
  * use, so a reader matching a row to a card is matching on colour as well as name.
  */
-function renderRowTier(tier: QuickViewTier, nav: string | undefined): string {
+function renderRowTier(tier: QuickViewTier, posture: string | undefined): string {
   const label = (level: ResiliencyLevel, compact: boolean) =>
     `<span class="tier-badge" style="background:${TIER_BADGE_COLOR[level]}">${
       escapeHtml(compact ? TIER_LABELS[level].replace(' Resiliency', '') : TIER_LABELS[level])
@@ -1253,13 +1263,42 @@ function renderRowTier(tier: QuickViewTier, nav: string | undefined): string {
   const body = `<span class="qv-tier">${badges}<span class="qv-tier-note">${escapeHtml(tier.note)}</span></span>`;
   // Linked to the gateway's posture card, which is where the tier is derived — the
   // badge states a verdict, and the checklist behind it is one section down.
-  return nav ? `<a class="qv-tier-link" href="#${nav}-posture">${body}</a>` : body;
+  return posture ? `<a class="qv-tier-link" href="#${posture}">${body}</a>` : body;
+}
+
+/**
+ * Where a quick-view row's links land. A DX gateway row opens its gateway card's
+ * subsections; a Transit Gateway row opens the TGW card, which has no VIF table
+ * (its posture lists the feeding gateways) and whose prefix figure is the Route
+ * resilience block rather than a route-diff matrix.
+ */
+interface QuickViewRowNav {
+  kind: 'dxgw' | 'tgw';
+  nav: string;
+  posture: string;
+  vifs: string;
+  prefix: string;
+}
+
+function quickViewRowNav(
+  row: { kind: string; targetId?: string },
+  gwNavIds: Map<string, string>,
+  tgwNavIds: Map<string, string>,
+): QuickViewRowNav | undefined {
+  if (!row.targetId) return undefined;
+  if (row.kind === 'tgw') {
+    const nav = tgwNavIds.get(row.targetId);
+    return nav ? { kind: 'tgw', nav, posture: `${nav}-posture`, vifs: `${nav}-posture`, prefix: `${nav}-rr` } : undefined;
+  }
+  const nav = gwNavIds.get(row.targetId);
+  return nav ? { kind: 'dxgw', nav, posture: `${nav}-posture`, vifs: `${nav}-vifs`, prefix: `${nav}-prefix` } : undefined;
 }
 
 function renderQuickView(
   qv: QuickView,
   gwNavIds: Map<string, string>,
   gwPrefixAnchors: Map<string, string>,
+  tgwNavIds: Map<string, string>,
 ): string {
   /**
    * Floor widths per column, so the table's proportions come from what each column
@@ -1289,19 +1328,19 @@ function renderQuickView(
     .join('');
 
   const rows = qv.rows.map((row) => {
-    const nav = row.targetId ? gwNavIds.get(row.targetId) : undefined;
-    const label = nav
-      ? `<a href="#${nav}">${escapeHtml(row.label)}</a>`
+    const rowNav = quickViewRowNav(row, gwNavIds, tgwNavIds);
+    const label = rowNav
+      ? `<a href="#${rowNav.nav}">${escapeHtml(row.label)}</a>`
       : escapeHtml(row.label);
     const cells = qv.columns
       .map((c) => {
         const cell = row.cells.get(c.id);
         if (!cell) return `<td class="${c.numeric ? 'qv-num ' : ''}qv-na"><span class="qv-fig">&mdash;</span></td>`;
-        return renderQuickViewCell(cell, c.numeric, gwNavIds, row.targetId, c.id, gwPrefixAnchors);
+        return renderQuickViewCell(cell, c.numeric, row.targetId, c.id, gwPrefixAnchors, rowNav);
       })
       .join('');
     return `<tr class="qv-${row.kind}">
-      <th class="qv-rowhead">${label}${row.sublabel ? `<span class="qv-sub">${escapeHtml(row.sublabel)}</span>` : ''}${renderRowTier(row.tier, nav)}</th>
+      <th class="qv-rowhead">${label}${row.sublabel ? `<span class="qv-sub">${escapeHtml(row.sublabel)}</span>` : ''}${renderRowTier(row.tier, rowNav?.posture)}</th>
       ${cells}
     </tr>`;
   }).join('');
@@ -1317,8 +1356,8 @@ function renderQuickView(
 
   return `<div class="qv-wrap">
     <table class="qv">
-      <thead><tr><th class="qv-rowhead" style="min-width:196px">Direct Connect gateway
-        <span class="qv-u">Name, ID and resiliency tier</span></th>${head}</tr></thead>
+      <thead><tr><th class="qv-rowhead" style="min-width:196px">Gateway
+        <span class="qv-u">Transit Gateway, or DX gateway for private VIFs &mdash; name, ID and tier</span></th>${head}</tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </div>
@@ -2381,6 +2420,15 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
   const gwNavIds = new Map(gwViews.map((v) => [v.gw.dxGatewayId, v.navId]));
 
   /**
+   * One card per group of Transit Gateways fed by the same DX gateways (identical
+   * scope, so identical tier and findings). Ordinal anchors for the same reason the
+   * gateway cards use them: `redact()` masks a TGW id inside an `id=` or `href=`.
+   */
+  const tgwViews = groupTgwsByFeeders(assessment.perTgw ?? [])
+    .map((tgws, i) => ({ navId: `tgw${i + 1}`, tgws, lead: tgws[0] }));
+  const tgwNavIds = new Map(tgwViews.flatMap((v) => v.tgws.map((t) => [t.tgwId, v.navId] as const)));
+
+  /**
    * Why the prefix comparisons below may be empty, stated ONCE above the cards.
    *
    * "Asked and AWS said no" is a different fact from "never asked", and only the first
@@ -2559,6 +2607,15 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
       id: 'gw-other',
       title: `No DX gateway (${orphanVifs.length} VIF${orphanVifs.length === 1 ? '' : 's'})`,
     }] : []),
+    ...(tgwViews.length ? [
+      { id: 'per-tgw', title: 'Overview', band: 'Per Transit Gateway' },
+      ...tgwViews.map((v) => ({
+        id: v.navId,
+        title: v.tgws.map((t) => t.tgwName).join(', '),
+        group: true,
+        badge: v.lead.recommendations.length ? { text: String(v.lead.recommendations.length) } : { ok: true },
+      })),
+    ] : []),
     {
       id: 'findings',
       // The account total, matching the findings strip: the section accounts for every
@@ -2780,8 +2837,10 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
     // "1 conn @ X" while sitting next to a links column reporting two
     // connections at that same location — the two numbers are both right and
     // the report looked like it contradicted itself.
-    for (const [loc, n] of [...scopeStats.locationConns.entries()].sort()) {
-      if (n < 2) gaps.push(`1 device @ ${loc}`);
+    // Only the locations Maximum still needs: past two device-redundant
+    // locations, a single-device site is not a coverage gap (the SLA bar).
+    for (const loc of maximumTierGapLocations(scopeStats.locationConns).sort()) {
+      gaps.push(`1 device @ ${loc}`);
     }
     return { covered: gaps.length === 0, gaps };
   };
@@ -3017,6 +3076,9 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
    */
   const renderGatewayPosture = (v: GwView): string => {
     const gw = v.gw;
+    const transitTgws = (gw.assessedAtTgwIds ?? [])
+      .map((id) => (assessment.perTgw ?? []).find((t) => t.tgwId === id))
+      .filter((t): t is TgwAssessment => !!t);
     const currentColor = TIER_BADGE_COLOR[gw.currentLevel];
     const targetColor = TIER_BADGE_COLOR[gw.targetLevel];
     const atCeiling = gw.currentLevel === 'maximum';
@@ -3042,8 +3104,15 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
             : `<span class="chip-pill band-elevated">Single device</span>`}</td>
         </tr>`).join('');
 
-    return `<div class="gw-posture">
-      <div class="gw-posture-tiers">
+    // Decision A: a transit gateway keeps its card (its VIFs, routes and fixes live
+    // here) but states no tier of its own — a sibling feeding the same TGW changes it.
+    const tiersRow = transitTgws.length
+      ? `<div class="gw-posture-tiers">
+          <span class="table-chip">Graded at the Transit Gateway</span>
+          ${transitTgws.map((t) => `<a href="#${tgwNavIds.get(t.tgwId)}">${escapeHtml(t.tgwName)}</a>
+            <span class="tier-badge" style="background:${TIER_BADGE_COLOR[t.currentLevel]}">${escapeHtml(TIER_LABELS[t.currentLevel])}</span>`).join(' ')}
+        </div>`
+      : `<div class="gw-posture-tiers">
         <span class="tier-badge" style="background:${currentColor}">${escapeHtml(TIER_LABELS[gw.currentLevel])}</span>
         <span class="table-sla">${escapeHtml(TIER_SLA[gw.currentLevel])}</span>
         ${atCeiling
@@ -3051,14 +3120,18 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
           : `<span class="arrow">&rarr;</span>
              <span class="tier-badge" style="background:${targetColor}">${escapeHtml(TIER_LABELS[gw.targetLevel])}</span>
              <span class="table-sla">${escapeHtml(TIER_SLA[gw.targetLevel])}</span>`}
-      </div>
+      </div>`;
+    return `<div class="gw-posture">
+      ${tiersRow}
       <p class="gw-posture-coverage"><span class="gw-posture-k">Protection coverage</span>
         ${coverage.covered
           ? `<span class="table-chip chip-ok" title="Every protection check passes for this gateway">&#10003; Fully covered</span>`
           : coverage.gaps
               .map((g) => `<a class="table-chip chip-gap" href="#${v.navId}-findings" title="${escapeHtml(`${g} — open this gateway's findings`)}">${escapeHtml(g)}</a>`)
               .join(' ')}</p>
-      <p class="meta"><strong>Next step:</strong> ${escapeHtml(atCeiling ? 'Maintain operational best practices.' : next.step)}</p>
+      <p class="meta"><strong>Next step:</strong> ${transitTgws.length
+        ? 'Transit VIFs are graded over every path into the Transit Gateway; its card states the gap, and the findings below carry this gateway&rsquo;s part of the fix.'
+        : escapeHtml(atCeiling ? 'Maintain operational best practices.' : next.step)}</p>
       <table>
         <thead><tr><th>DX location</th><th style="text-align:right">Connections</th>
           <th style="text-align:right">AWS devices</th><th>Device redundancy</th></tr></thead>
@@ -3396,6 +3469,152 @@ export function buildHtmlReport(topology: TopologyData, assessment: CombinedAsse
           }).join('')}</tbody>
         </table>
       </section>`
+    : '';
+
+  /**
+   * A Transit Gateway reached over transit VIFs. Its findings restate, at TGW scope,
+   * gaps the feeding gateways' own findings already carry with the fix, so they are
+   * listed here but not counted in the findings strip — counting both would report
+   * one gap twice.
+   */
+  /**
+   * Per-prefix route resilience for one TGW: every on-prem prefix reaching it, graded
+   * across all its transit VIFs. Graded from the VIFs because the TGW route table shows
+   * only the preferred route. Lists only what needs work — the passing prefixes are a
+   * count — so the card stays readable on a gateway with hundreds of prefixes.
+   */
+  const TGW_GRADE_TEXT: Record<PrefixGrade, string> = {
+    rejected: '&#8856; Rejected (AS loop)',
+    none: '&#10006; No backup',
+    partial: '&#9651; Partial',
+    device: '&#9889; One AWS device',
+    site: '&#9873; One DX location',
+    high: '&#10003; High',
+    maximum: '&#10003; Maximum',
+    unknown: '? Unknown',
+  };
+  const TGW_RESILIENCE_ROW_CAP = 25;
+  const renderTgwRouteResilience = (t: TgwAssessment, anchor?: string): string => {
+    const a = assessTgwRouteResilience(topology, t.tgwId, t.dxGatewayIds);
+    const heading = `<h4 class="subsection-title"${anchor ? ` id="${anchor}"` : ''}>Route resilience &mdash; ${escapeHtml(t.tgwName)}</h4>`;
+    if (!a) {
+      return `${heading}<p class="meta">Not assessed. ${topology.vifRoutes?.size
+        ? 'Fewer than two transit VIFs reaching this Transit Gateway returned route data.'
+        : routesMissingNote()}</p>`;
+    }
+    const total = a.rows.length;
+    const ok = a.counts.high + a.counts.maximum;
+    const below = a.rows.filter((row) => row.grade !== 'high' && row.grade !== 'maximum' && row.grade !== 'unknown');
+    const asnText = a.asn != null ? redactAsn(a.asn, prov.redacted) : '';
+    const tally = (['rejected', 'none', 'partial', 'device', 'site'] as const)
+      .filter((g) => a.counts[g] > 0)
+      .map((g) => `${a.counts[g]} ${TGW_GRADE_TEXT[g]}`)
+      .join(' &middot; ');
+    const viaCell = (row: (typeof a.rows)[number]): string => {
+      if (!a.viaKnown) {
+        return a.foreignOwner
+          ? `<span class="sub" title="Owned by another account — its route table is not readable from this one">owned by ${escapeHtml(a.foreignOwner)}</span>`
+          : '<span class="sub">not readable</span>';
+      }
+      if (row.via.state === 'missing') return '<span class="chip-pill band-elevated">not in TGW</span>';
+      if (row.via.state !== 'found') return '<span class="sub">unknown</span>';
+      if (row.via.blackhole) return '<span class="chip-pill band-elevated">blackhole</span>';
+      const via = row.via;
+      // A static route is named as one: it forwards whatever BGP says, so it is the
+      // reason a looped prefix can still be installed.
+      const names = via.dxGatewayIds.map((id) => {
+        const name = assessment.perDxGateway.find((g) => g.dxGatewayId === id)?.dxGatewayName || id;
+        return via.staticDxGatewayIds.includes(id) ? `static → ${name}` : name;
+      });
+      const text = escapeHtml([...names, ...via.other.map((o) => o.resourceType)].join(', ') || '—');
+      return row.mismatch
+        ? `${text} <span class="chip-pill band-elevated" title="Every VIF copy reads as rejected, yet the TGW has the prefix installed. The VIF routes and the route table were read at different moments — refresh and re-export.">read at different times</span>`
+        : text;
+    };
+    const shown = below.slice(0, TGW_RESILIENCE_ROW_CAP);
+    return `${heading}
+      <p class="meta"><strong>${ok} of ${total}</strong> on-premises prefix${total === 1 ? '' : 'es'}
+        survive a DX location failure.${tally ? ` Below High: ${tally}.` : ''}
+        ${a.counts.unknown ? ` ${a.counts.unknown} could not be graded (a carrier's location is unresolved).` : ''}</p>
+      ${a.counts.rejected
+        ? `<p class="meta"><strong>${a.counts.rejected} prefix${a.counts.rejected === 1 ? ' is' : 'es are'} rejected by this
+          Transit Gateway.</strong> Every copy's AS path already contains its own ASN, ${asnText}, so BGP loop prevention
+          discards ${a.counts.rejected === 1 ? 'it' : 'them'}: accepted on the VIFs, never installed in the TGW. Something
+          on-premises is likely using AS ${asnText}.</p>`
+        : ''}
+      ${a.asn == null
+        ? (a.foreignOwner
+          ? `<p class="meta">This Transit Gateway is owned by account ${escapeHtml(a.foreignOwner)}, so its route table and ASN are not readable from this account and AS-loop rejection was not checked. Add ${escapeHtml(a.foreignOwner)} as a spoke account at sign-in to read them.</p>`
+          : `<p class="meta">This Transit Gateway's ASN is not readable from this account, so AS-loop rejection was not checked.</p>`)
+        : ''}
+      ${shown.length
+        ? `<table>
+          <thead><tr><th>Prefix</th><th>Grade</th><th>Active via</th></tr></thead>
+          <tbody>${shown.map((row) => `<tr>
+            <td><code class="inline-id">${escapeHtml(row.cidr)}</code></td>
+            <td>${TGW_GRADE_TEXT[row.grade]}</td>
+            <td>${viaCell(row)}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+        ${below.length > shown.length ? `<p class="meta">&hellip; and ${below.length - shown.length} more below High.</p>` : ''}`
+        : ''}
+      <p class="meta">Graded from the transit VIFs because the TGW route table shows only the preferred route &mdash; a
+        backup appears there only once the active route is withdrawn.</p>`;
+  };
+  const renderTgwCard = (v: (typeof tgwViews)[number]): string => {
+    const t = v.lead;
+    const atCeiling = t.currentLevel === 'maximum';
+    const feeders = t.dxGatewayIds
+      .map((id) => {
+        const name = assessment.perDxGateway.find((g) => g.dxGatewayId === id)?.dxGatewayName || id;
+        const nav = gwNavIds.get(id);
+        return nav ? `<a href="#${nav}">${escapeHtml(name)}</a>` : escapeHtml(name);
+      })
+      .join(', ');
+    const findings = t.recommendations.length === 0
+      ? `<p class="meta"><span class="table-chip chip-ok">&#10003; Nothing flagged</span></p>`
+      : `<ul>${t.recommendations.map((r) => {
+          const meta = metaFor(r.ruleId);
+          return `<li>${meta ? `<code class="finding-id">${escapeHtml(meta.publishedId)}</code> ` : ''}<strong>${escapeHtml(r.title)}</strong> &mdash; ${escapeHtml(r.description)}</li>`;
+        }).join('')}</ul>`;
+    return `<section class="dxgw-section">
+      <div class="dxgw-section-head" id="${v.navId}">
+        <div class="dxgw-section-title">
+          <span class="dxgw-chip">Transit Gateway</span>
+          <span class="dxgw-name">${escapeHtml(v.tgws.map((x) => x.tgwName).join(', '))}</span>
+          ${v.tgws.filter((x) => x.tgwName !== x.tgwId).map((x) => `<code class="dxgw-id">${escapeHtml(x.tgwId)}</code>`).join(' ')}
+        </div>
+        <div class="dxgw-section-meta">${t.transitVifCount} transit VIF${t.transitVifCount === 1 ? '' : 's'}
+          &middot; ${t.locationCount} location${t.locationCount === 1 ? '' : 's'}
+          &middot; ${t.connectionCount} connection${t.connectionCount === 1 ? '' : 's'}${t.region ? ` &middot; ${escapeHtml(t.region)}` : ''}</div>
+      </div>
+      <div class="gw-posture" id="${v.navId}-posture">
+        <div class="gw-posture-tiers">
+          <span class="tier-badge" style="background:${TIER_BADGE_COLOR[t.currentLevel]}">${escapeHtml(TIER_LABELS[t.currentLevel])}</span>
+          <span class="table-sla">${escapeHtml(TIER_SLA[t.currentLevel])}</span>
+          ${atCeiling
+            ? `<span class="table-muted">&mdash; highest tier</span>`
+            : `<span class="arrow">&rarr;</span>
+               <span class="tier-badge" style="background:${TIER_BADGE_COLOR[t.targetLevel]}">${escapeHtml(TIER_LABELS[t.targetLevel])}</span>
+               <span class="table-sla">${escapeHtml(TIER_SLA[t.targetLevel])}</span>`}
+        </div>
+        <p class="meta">Reached through ${feeders}.</p>
+      </div>
+      ${findings}
+      ${v.tgws.map((x, i) => renderTgwRouteResilience(x, i === 0 ? `${v.navId}-rr` : undefined)).join('')}
+    </section>`;
+  };
+  const routesReadNote = topology.routesReadAt
+    ? ` VIF routes and this account&rsquo;s TGW route tables were read together at ${escapeHtml(formatUtcStamp(topology.routesReadAt))}.`
+    : '';
+  const tgwBand = tgwViews.length
+    ? `<h2 id="per-tgw">Per-Transit Gateway assessment</h2>
+      <p class="meta">A transit VIF&rsquo;s DX gateway is only a hop, so transit connectivity is graded
+      here, over every transit VIF reaching each Transit Gateway across all its DX gateways. Transit
+      Gateways fed by the same gateways share a card. The fix for each gap is stated, with the
+      connections it needs, on the feeding gateway&rsquo;s card; these findings restate it at Transit
+      Gateway scope and are not counted again in the totals.${routesReadNote}</p>
+      ${tgwViews.map(renderTgwCard).join('\n')}`
     : '';
 
   const hasPerDxgw = assessment.perDxGateway.length > 0;
@@ -3926,14 +4145,15 @@ ${mask(`<div class="container">
   </header>
   ${renderIncompleteDataNoticeHtml(topology)}
 
-  <h2 id="check-matrix">Resiliency exposure by Direct Connect gateway</h2>
-  <p class="meta"><b>Rows</b> &mdash; each Direct Connect gateway, then the account total.
+  <h2 id="check-matrix">Resiliency exposure by gateway</h2>
+  <p class="meta"><b>Rows</b> &mdash; each Transit Gateway reached over transit VIFs (graded there,
+  across every DX gateway feeding it), each DX gateway carrying private VIFs, then the account total.
   <b>Cells</b> &mdash; affected count over population assessed; <code class="inline-id">&mdash;</code>
   means not assessed, not passed. Every figure links to its records.
   <b>Scope</b> &mdash; conditions that can interrupt traffic. Non-disruptive checks (MTU, BGP
   authentication, support tier, tagging, AWS Health history) are under Best practices.
   <b>Reference</b> &mdash; ${QUICKVIEW_DOC_LINE}</p>
-  ${renderQuickView(quickView, gwNavIds, gwPrefixAnchors)}
+  ${renderQuickView(quickView, gwNavIds, gwPrefixAnchors, tgwNavIds)}
 
   <h2 id="executive-summary">Executive summary</h2>
   ${renderFindingsStrip(findingCounts)}
@@ -3957,6 +4177,7 @@ ${mask(`<div class="container">
       ${docLink(DOC.toolkit)} &middot;
       ${docLink(DOC.sla)}</p>`}
   ${perDxgwSections}
+  ${tgwBand}
 
   <h2 id="findings">All findings by severity</h2>
   <p class="meta">Every finding in the account, at every severity. A finding scoped to one DX

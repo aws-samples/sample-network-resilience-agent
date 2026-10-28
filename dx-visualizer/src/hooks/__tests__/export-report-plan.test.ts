@@ -3,6 +3,7 @@ import { buildHtmlReport } from '../useExportReport';
 import { analyzeTopology } from '../../engine/recommendation-engine';
 import { getMockTopology } from '../../utils/mock-data';
 import type { MockScenario } from '../../utils/shared';
+import { stripTags } from './helpers';
 
 const SCENARIOS: MockScenario[] = ['noResiliency', 'devTest', 'high', 'maximum', 'crossAccount'];
 
@@ -115,9 +116,15 @@ describe('finding cards', () => {
     }
     const multi = [...byKey.values()].filter((d) => d.size > 1);
     const html = buildHtmlReport(topology, assessment, 'crossAccount', 'light');
+    // Compared as visible text: the report links VIF names inside a description
+    // (linkifyFinding), so the raw HTML never contains the description verbatim.
+    const text = stripTags(html, '')
+      .replace(/&mdash;/g, '\u2014').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    // Guards against passing vacuously, as it did while this scenario had one gateway.
+    expect(multi.length).toBeGreaterThan(0);
     for (const descriptions of multi) {
       for (const d of descriptions) {
-        expect(html).toContain(d.replace(/&/g, '&amp;').replace(/</g, '&lt;'));
+        expect(text).toContain(d);
       }
     }
   });

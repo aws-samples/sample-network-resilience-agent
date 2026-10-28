@@ -66,7 +66,8 @@ describe('export report quick view', () => {
     expect(kinds.filter((k) => k === 'total')).toHaveLength(1);
     expect(kinds[kinds.length - 1]).toBe('total');
     // Every gateway the report assessed needs a row, or the table understates the estate.
-    expect(kinds.filter((k) => k === 'dxgw').length).toBeGreaterThan(0);
+    // Transit gateways are graded at their TGW, so their row is the TGW's.
+    expect(kinds.filter((k) => k === 'dxgw' || k === 'tgw').length).toBeGreaterThan(0);
   });
 
   it('names each gateway in the left column and links it to its own section', () => {

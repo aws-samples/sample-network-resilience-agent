@@ -3,7 +3,7 @@ import { Handle, Position } from '@xyflow/react';
 import type { NodeBadge } from '../../types/topology';
 import { COLORS } from '../../utils/colors';
 import { dimOpacityFor } from '../../utils/constants';
-import { useTopologyStore } from '../../store/topology-store';
+import { useTopologyStore, isRecPathActive } from '../../store/topology-store';
 import { useRedact } from '../../utils/redact';
 import { TagMarker } from './TagMarker';
 
@@ -92,6 +92,10 @@ export const BaseNode = memo(function BaseNode({
   // here must be motionless: this is the third attempt, and motion was the defect
   // both previous times.
   const isRouteDiffPath = useTopologyStore((s) => nodeId != null && s.routeDiffPickedNodeIds.has(nodeId));
+  // A clicked tier option's recommended path: lit with a static green ring, the
+  // rest of the canvas stepped back. Stable booleans, as above.
+  const isRecPathLit = useTopologyStore((s) => nodeId != null && isRecPathActive(s) && s.recPathNodeIds.has(nodeId));
+  const isRecPathMuted = useTopologyStore((s) => nodeId != null && isRecPathActive(s) && !s.recPathNodeIds.has(nodeId));
   // Carries the active tag filter's tags itself (vs. path context around a match).
   const isTagMatch = useTopologyStore(
     (s) => nodeId != null && s.tagFilters.length > 0 && s.tagMatchNodeIds.has(nodeId),
@@ -147,7 +151,7 @@ export const BaseNode = memo(function BaseNode({
 
   // Hover-path highlight: dim everything not on the path; nodes on the path stay
   // their normal color. The contrast + the accent-colored path edges carry the signal.
-  const hoverOpacity = isDimmed ? dimOpacityFor('node', light) : undefined;
+  const hoverOpacity = isDimmed || isRecPathMuted ? dimOpacityFor('node', light) : undefined;
 
   // The top/bottom dots are connect affordances and nothing else: no discovered
   // edge anchors to them, only a hand-drawn customer link, which can only be drawn
@@ -171,7 +175,7 @@ export const BaseNode = memo(function BaseNode({
         tabIndex={canToggleFailure ? 0 : undefined}
         aria-pressed={canToggleFailure ? isFailed : undefined}
         aria-label={canToggleFailure ? `Toggle simulated failure for ${r(label)}` : undefined}
-        className={`relative flex flex-col items-start justify-center rounded-md px-2.5 py-1.5 transition-all ${canGlow ? 'hover:brightness-110' : ''} ${isSpotlit ? 'node-spotlight' : ''} ${isPinned ? 'node-pinned' : ''} ${isRouteDiffPath && !isSpotlit && !isPinned ? 'node-routediff' : ''}`}
+        className={`relative flex flex-col items-start justify-center rounded-md px-2.5 py-1.5 transition-all ${canGlow ? 'hover:brightness-110' : ''} ${isSpotlit ? 'node-spotlight' : ''} ${isPinned ? 'node-pinned' : ''} ${isRouteDiffPath && !isSpotlit && !isPinned ? 'node-routediff' : ''} ${isRecPathLit && !isSpotlit && !isPinned && !isRouteDiffPath ? 'node-recpath' : ''}`}
         style={{
           borderWidth: isFailed ? 2.5 : light ? 1 : 1.5,
           borderStyle: isRecommended ? 'dashed' : 'solid',

@@ -5,6 +5,7 @@ import type {
   Recommendation,
   DxGatewayAssessment,
   VgwAssessment,
+  TgwAssessment,
   PublicVifAssessment,
   LagAssessment,
 } from '../types/recommendations';
@@ -14,6 +15,7 @@ import {
   ruleNoTgw,
   ruleSingleVgw,
   ruleLagResiliency,
+  ruleTgwResiliency,
   type ResiliencyTarget,
 } from './resiliency-rules';
 import {
@@ -33,15 +35,13 @@ import {
   ruleWellArchitectedReviewRequired,
   getAllBestPracticeResults,
 } from './bestpractice-rules';
-import { getLocationDeviceCounts, findReusableLocation, findReusableSinkLocation, getSinkConnectedDevices, getUsedLocations, type SinkDeviceInfo } from './sla-gating';
+import { getLocationDeviceCounts, findReusableLocation, findReusableSinkLocation, getSinkConnectedDevices, getUsedLocations, maximumTierGapLocations, meetsMaximumTier, type SinkDeviceInfo } from './sla-gating';
 import { groupDxGatewaysBySharedDownstream, getGroupLocations, sharedDownstreamNames } from './downstream-grouping';
 
 function determineResiliencyLevel(topology: TopologyData): ResiliencyLevel {
   if (topology.connections.length === 0 && topology.virtualInterfaces.length === 0) return 'none';
 
   const locationDevices = getLocationDeviceCounts(topology);
-  const allLocationsHaveMultiple =
-    locationDevices.size > 0 && [...locationDevices.values()].every((c) => c >= 2);
 
   // AWS Direct Connect SLA page defines three named deployments:
   //  - Multi-Site Redundant    → 99.99% (2+ locations, 2+ devices each)
@@ -51,7 +51,8 @@ function determineResiliencyLevel(topology: TopologyData): ResiliencyLevel {
   // stronger than Single Connection (device redundancy without site redundancy),
   // so we keep it under 'devtest' alongside the single-connection case — both
   // are covered by the Single Connection 95% SLA per Connection.
-  if (locationDevices.size >= 2 && allLocationsHaveMultiple) return 'maximum';
+  // Two device-redundant locations, per the SLA — see `meetsMaximumTier`.
+  if (meetsMaximumTier(locationDevices.values())) return 'maximum';
   if (locationDevices.size >= 2) return 'high';
   if (locationDevices.size >= 1) return 'devtest';
   return 'none';
@@ -173,6 +174,113 @@ function buildVgwScope(topology: TopologyData, vgwId: string): TopologyData {
     locations: scopedLocations,
     lags: scopedLags,
   };
+}
+
+interface DxReachedTgw {
+  tgwId: string;
+  region?: string;
+  ownerAccount?: string;
+  /** Feeding DX gateways, in `topology.dxGateways` order. */
+  dxGatewayIds: string[];
+}
+
+/**
+ * Transit Gateways reached over Direct Connect: some live (`associated` /
+ * `associating`) DX gateway association targets the TGW, and that gateway
+ * carries at least one transit VIF.
+ *
+ * Keyed by the association's id, NOT filtered through `topology.transitGateways`
+ * — a TGW in another region or account is still the thing the transit VIF
+ * serves, and dropping it because this account can't describe it would silently
+ * drop the assessment. Prefix-pool stubs are skipped: AWS redacted the target, so
+ * there is no TGW id to key on.
+ *
+ * Returned in first-association order for a deterministic card order.
+ */
+function dxReachedTgws(topology: TopologyData): DxReachedTgw[] {
+  const transitDxgwIds = new Set(
+    topology.virtualInterfaces
+      .filter((v) => v.virtualInterfaceType === 'transit' && v.directConnectGatewayId)
+      .map((v) => v.directConnectGatewayId as string),
+  );
+  const byTgw = new Map<string, { region?: string; ownerAccount?: string; dxgwIds: Set<string> }>();
+  for (const assoc of topology.dxGatewayAssociations) {
+    if (assoc.isPrefixPoolStub) continue;
+    if (assoc.associatedGateway?.type !== 'transitGateway' || !assoc.associatedGateway.id) continue;
+    const state = assoc.associationState.toLowerCase();
+    if (state !== 'associated' && state !== 'associating') continue;
+    if (!transitDxgwIds.has(assoc.directConnectGatewayId)) continue;
+    const tgwId = assoc.associatedGateway.id;
+    let entry = byTgw.get(tgwId);
+    if (!entry) {
+      entry = { region: assoc.associatedGateway.region || undefined, ownerAccount: assoc.associatedGateway.ownerAccount || undefined, dxgwIds: new Set() };
+      byTgw.set(tgwId, entry);
+    }
+    entry.dxgwIds.add(assoc.directConnectGatewayId);
+  }
+  return [...byTgw].map(([tgwId, e]) => ({
+    tgwId,
+    region: e.region,
+    ownerAccount: e.ownerAccount,
+    dxGatewayIds: topology.dxGateways.map((g) => g.directConnectGatewayId).filter((id) => e.dxgwIds.has(id)),
+  }));
+}
+
+/**
+ * The DX path into one TGW: every TRANSIT VIF on the feeding gateways, plus the
+ * connections, locations and LAGs under them. Spreads the topology like
+ * `buildDxgwGroupScope`, so VIF-keyed data (routes, metrics) survives.
+ */
+function buildTgwScope(topology: TopologyData, dxGatewayIds: string[]): TopologyData {
+  const group = buildDxgwGroupScope(topology, new Set(dxGatewayIds));
+  const transitVifs = group.virtualInterfaces.filter((v) => v.virtualInterfaceType === 'transit');
+  if (transitVifs.length === group.virtualInterfaces.length) return group;
+  // AWS forbids a private VIF on a TGW-associated gateway, so this only trims
+  // malformed or hand-built data — but grading it would count a path that
+  // cannot reach the TGW.
+  const connIds = new Set(transitVifs.map((v) => v.connectionId).filter(Boolean) as string[]);
+  const locationCodes = new Set<string>();
+  const connections = group.connections.filter((c) => connIds.has(c.connectionId));
+  for (const c of connections) if (c.location) locationCodes.add(c.location);
+  for (const v of transitVifs) if (v.location) locationCodes.add(v.location);
+  return {
+    ...group,
+    virtualInterfaces: transitVifs,
+    connections,
+    locations: group.locations.filter((l) => locationCodes.has(l.locationCode)),
+    lags: group.lags.filter((lag) => lag.connections.some((c) => connIds.has(c.connectionId))),
+  };
+}
+
+/**
+ * The device-gap ghosts a Transit Gateway's Maximum pick draws, graded over the
+ * TGW's own scope — the union of its feeders' transit VIFs — which is what its
+ * card text (`ruleTgwResiliency`) already uses.
+ *
+ * Reusing the feeders' own ghosts drew the wrong set: each feeder suppresses a
+ * device gap its shared-downstream GROUP already covers, and that group spans
+ * every TGW the gateway reaches. On a live account dxgw04 fed tgw03 alone and
+ * tgw02 alongside dxgw01; dxgw01's second ATTC1 device covered ATTC1 for the
+ * group, so tgw03's card said "ATTC1 and KDOS2" while the canvas drew KDOS2 only.
+ * Each ghost fans into one feeder present at that location (first by the TGW's
+ * feeder order), so it plugs into an existing path rather than a new one.
+ */
+function tgwDeviceGapGhosts(topology: TopologyData, scope: TopologyData, dxGatewayIds: string[]): Recommendation[] {
+  const gaps = maximumTierGapLocations(getLocationDeviceCounts(scope));
+  const recs: Recommendation[] = [];
+  for (const location of gaps) {
+    const feeder = dxGatewayIds.find((id) => {
+      const feederScope = buildTgwScope(topology, [id]);
+      return getLocationDeviceCounts(feederScope).has(location);
+    });
+    if (!feeder) continue;
+    const feederScope = buildTgwScope(topology, [feeder]);
+    recs.push(...ruleSingleConnectionPerLocation(
+      feederScope, 'maximum', feeder, false, getSinkConnectedDevices(feederScope, topology),
+      undefined, 'dxgw', new Set([location]),
+    ));
+  }
+  return recs;
 }
 
 /**
@@ -391,7 +499,7 @@ export function analyzeTopology(
   for (const l of topology.lags) {
     if (l.location) lagLocationsMap.set(l.location, (lagLocationsMap.get(l.location) ?? 0) + 1);
   }
-  const lagIsMaximum = lagLocationsMap.size >= 2 && [...lagLocationsMap.values()].every((c) => c >= 2);
+  const lagIsMaximum = meetsMaximumTier(lagLocationsMap.values());
 
   // --- Public VIF carrier resolution (priority: LAG > DXGW > standalone) ---
   // A standalone public VIF is a sink, not its own infrastructure. When its
@@ -732,6 +840,48 @@ export function analyzeTopology(
     });
   }
 
+  // --- Per-TGW assessments (TGWs reached over transit VIFs) ---
+  // Graded over every transit VIF reaching the TGW, across all its feeding
+  // gateways. Runs AFTER the per-DXGW loop because the TGW's target is derived
+  // from its feeders': the ghost paths a TGW card's findings point at are minted
+  // by those gateways at THEIR targets, so a TGW target of its own (with no
+  // ghosts to change) would only let the card's wording and the canvas disagree.
+  const perTgw: TgwAssessment[] = [];
+  const tgwIdsByDxgw = new Map<string, string[]>();
+  for (const tgw of dxReachedTgws(topology)) {
+    const scope = buildTgwScope(topology, tgw.dxGatewayIds);
+    if (scope.virtualInterfaces.length === 0) continue;
+    const level = determineResiliencyLevel(scope);
+    const feederWantsMaximum = perDxGateway.some(
+      (g) => tgw.dxGatewayIds.includes(g.dxGatewayId) && g.targetLevel === 'maximum',
+    );
+    const effectiveTarget: ResiliencyTarget =
+      level === 'maximum' || level === 'high' || feederWantsMaximum ? 'maximum' : 'high';
+    const tgwName = topology.transitGateways.find((t) => t.transitGatewayId === tgw.tgwId)?.tags?.Name || tgw.tgwId;
+    perTgw.push({
+      tgwId: tgw.tgwId,
+      tgwName,
+      region: tgw.region,
+      ownerAccount: tgw.ownerAccount,
+      currentLevel: level,
+      targetLevel: effectiveTarget,
+      locationCount: getLocationDeviceCounts(scope).size,
+      connectionCount: scope.connections.length,
+      transitVifCount: scope.virtualInterfaces.length,
+      dxGatewayIds: tgw.dxGatewayIds,
+      recommendations: ruleTgwResiliency(scope, effectiveTarget, tgw.tgwId),
+      deviceGapRecommendations: effectiveTarget === 'maximum' && scope.lags.length === 0
+        ? tgwDeviceGapGhosts(topology, scope, tgw.dxGatewayIds)
+        : undefined,
+    });
+    for (const id of tgw.dxGatewayIds) tgwIdsByDxgw.set(id, [...(tgwIdsByDxgw.get(id) ?? []), tgw.tgwId]);
+  }
+  // Point each transit gateway's card at the TGW card(s) that now carry its tier.
+  for (const g of perDxGateway) {
+    const tgwIds = tgwIdsByDxgw.get(g.dxGatewayId);
+    if (tgwIds) g.assessedAtTgwIds = tgwIds;
+  }
+
   // --- LAG assessment ---
   // (Computed BEFORE the public VIF assessment: a carried public endpoint reuses
   // the carrier's ghost devices as public sinks, so the public block needs to
@@ -747,9 +897,10 @@ export function analyzeTopology(
     }
     const lagLocCount = lagsByLocation.size;
 
-    const allLocationsHaveMultipleLags = lagLocCount > 0 && [...lagsByLocation.values()].every((c) => c >= 2);
+    // A LAG counts as one Connection in the SLA, so two LAGs at each of two
+    // locations is the Maximum bar — the same rule as devices.
     const lagLevel: ResiliencyLevel =
-      lagLocCount >= 2 && allLocationsHaveMultipleLags ? 'maximum'
+      meetsMaximumTier(lagsByLocation.values()) ? 'maximum'
         : lagLocCount >= 2 ? 'high'
           : lagLocCount >= 1 ? 'devtest'
             : 'none';
@@ -949,6 +1100,7 @@ export function analyzeTopology(
     dxNotInUse,
     perDxGateway,
     perVgw,
+    perTgw,
     publicVif,
     lag,
     global: {
@@ -972,6 +1124,21 @@ export function analyzeTopology(
       recommendations: aggregateBestPracticeRecs,
     },
   };
+}
+
+/**
+ * TGWs fed by exactly the same DX gateways, grouped. Their scope is the same set
+ * of transit VIFs, so tier and findings are identical by construction — one card
+ * per TGW would repeat the same verdict (four times on the maximum demo). Shared
+ * by the score card and the report so the two group identically.
+ */
+export function groupTgwsByFeeders(perTgw: TgwAssessment[]): TgwAssessment[][] {
+  const groups = new Map<string, TgwAssessment[]>();
+  for (const t of perTgw) {
+    const key = t.dxGatewayIds.join('|');
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+  return [...groups.values()];
 }
 
 export const FOCUSED_PUBLIC_VIF = '__public-vif__';
@@ -1083,6 +1250,43 @@ export function getRecommendedGraph(
     return { nodes, edges };
   }
 
+  // A focused TGW draws the ghosts of every gateway feeding it: transit gateways
+  // have no card of their own in the panel, so the TGW card's tier pick is what
+  // asks for their fixes. It uses each feeder's AGGREGATE set, not its focus set:
+  // a gateway's focus set also draws the device gap at a peer's site (so a lone
+  // gateway shows the whole Maximum fix), and with every feeder drawn together
+  // that peer gap is the peer's own gap — merging focus sets drew each one twice
+  // (4 ghost devices for 2 gaps on tgw-spoke-d). The aggregate set already skips
+  // a peer site whose gateway targets Maximum, which the TGW pick guarantees.
+  // LAG carriers that land on a feeder are merged, and everything is scoped to the
+  // feeders' own nodes so a shared carrier's fan-out elsewhere stays hidden.
+  const tgwMatch = assessment.perTgw?.find((t) => t.tgwId === focusedDxGatewayId);
+  if (tgwMatch) {
+    const seenNodes = new Set<string>();
+    const seenEdges = new Set<string>();
+    const pushRec = (rec: Recommendation) => {
+      for (const n of rec.additionalNodes) if (!seenNodes.has(n.id)) { seenNodes.add(n.id); nodes.push(n); }
+      for (const e of rec.additionalEdges) if (!seenEdges.has(e.id)) { seenEdges.add(e.id); edges.push(e); }
+    };
+    const feederNodeIds = new Set(tgwMatch.dxGatewayIds.map((id) => `dxgw-${id}`));
+    // Device gaps come from the TGW's own scope when it has them (see
+    // tgwDeviceGapGhosts); the feeders' device-gap ghosts are graded over a
+    // different scope and would draw a different set.
+    const ownDeviceGaps = tgwMatch.deviceGapRecommendations;
+    for (const id of tgwMatch.dxGatewayIds) {
+      const gw = assessment.perDxGateway.find((g) => g.dxGatewayId === id);
+      for (const rec of (gw?.recommendations ?? []).filter((r) => r.category === 'resiliency')) {
+        if (ownDeviceGaps && rec.ruleId === 'single-connection-per-location') continue;
+        pushRec(rec);
+      }
+    }
+    for (const rec of ownDeviceGaps ?? []) pushRec(rec);
+    for (const rec of assessment.lag?.focusRecommendations ?? assessment.lag?.recommendations ?? []) {
+      if (rec.additionalEdges.some((e) => feederNodeIds.has(e.target))) pushRec(rec);
+    }
+    return scopeToSink((t) => t === 'pub-endpoints' || (t.startsWith('dxgw-') && !feederNodeIds.has(t)));
+  }
+
   if (focusedDxGatewayId) {
     // Dedup by id so a carrier ghost path (see below) isn't added twice when it
     // also appears in the DXGW's own recs.
@@ -1122,6 +1326,34 @@ export function getRecommendedGraph(
   for (const rec of assessment.resiliency.recommendations) {
     nodes.push(...rec.additionalNodes);
     edges.push(...rec.additionalEdges);
+  }
+
+  // View-all must draw what each TGW card asks for, too. The gateway ghosts above
+  // skip a device gap the gateway's shared-downstream GROUP covers, and that group
+  // can span a TGW the covering peer does not reach — so a TGW's own gap (graded
+  // over its feeders only, see tgwDeviceGapGhosts) is added here unless a ghost
+  // device already sits at that location on one of the TGW's feeders.
+  const seenNodes = new Set(nodes.map((n) => n.id));
+  const seenEdges = new Set(edges.map((e) => e.id));
+  for (const tgw of assessment.perTgw ?? []) {
+    // Only when the user asked for Maximum on a feeder. A TGW already at High
+    // aims its CARD at Maximum (the next tier), but the canvas follows the tier
+    // the user picked — drawing Maximum ghosts under a High pick over-draws.
+    const feederWantsMaximum = assessment.perDxGateway.some(
+      (g) => tgw.dxGatewayIds.includes(g.dxGatewayId) && g.targetLevel === 'maximum',
+    );
+    if (!feederWantsMaximum) continue;
+    const feederNodeIds = new Set(tgw.dxGatewayIds.map((id) => `dxgw-${id}`));
+    for (const rec of tgw.deviceGapRecommendations ?? []) {
+      const recDevices = rec.additionalNodes.filter((n) => n.data.category === 'awsDevice');
+      const covered = recDevices.every((d) => nodes.some((n) =>
+        n.data.category === 'awsDevice'
+        && n.data.details?.locationCode === d.data.details?.locationCode
+        && edges.some((e) => e.source === n.id && feederNodeIds.has(e.target))));
+      if (covered) continue;
+      for (const n of rec.additionalNodes) if (!seenNodes.has(n.id)) { seenNodes.add(n.id); nodes.push(n); }
+      for (const e of rec.additionalEdges) if (!seenEdges.has(e.id)) { seenEdges.add(e.id); edges.push(e); }
+    }
   }
 
   return { nodes, edges };

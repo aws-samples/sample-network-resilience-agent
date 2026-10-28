@@ -545,6 +545,8 @@ export interface TgwRouteTableWithRoutes {
    * propagates here. Rules must not treat unknown as absent.
    */
   propagations?: TgwRouteTablePropagation[];
+  /** AWS returned fewer routes than the table holds (`AdditionalRoutesAvailable`). */
+  routesTruncated?: boolean;
 }
 
 export interface DxMaintenanceEvent {

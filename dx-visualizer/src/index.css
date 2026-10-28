@@ -291,6 +291,24 @@ body {
   z-index: 2;
 }
 
+/* The recommended path of a clicked tier option: the same static ring as
+   .node-routediff, in the recommended green. Motionless for the same reason. */
+.node-recpath::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  padding: 2px;
+  background: #10b981;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* Pulse animation for live connection indicator */
 @keyframes live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
