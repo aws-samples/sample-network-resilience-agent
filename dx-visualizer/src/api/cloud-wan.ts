@@ -17,7 +17,32 @@ export async function fetchCoreNetworks(client: NetworkManagerClient): Promise<C
   const results: CloudWanCoreNetwork[] = [];
   for (const summary of summaries) {
     if (!summary.CoreNetworkId) continue;
-    const detail = await client.send(new GetCoreNetworkCommand({ CoreNetworkId: summary.CoreNetworkId }));
+    let detail;
+    try {
+      detail = await client.send(new GetCoreNetworkCommand({ CoreNetworkId: summary.CoreNetworkId }));
+    } catch (err) {
+      // A core network shared to this account through RAM is returned by
+      // ListCoreNetworks, but GetCoreNetwork on it answers
+      // ResourceNotFoundException — only the owner can describe it (verified
+      // live). Throwing here used to fail the whole fetch, dropping the
+      // account's OWN core networks with it. Keep the shared one from its list
+      // summary instead, so a DXGW attached to it still gets its DXGW → Core
+      // Network edge; its edges and segments are unknown from this account.
+      // Any other error is a real fault and still fails the fetch.
+      if ((err as { name?: string }).name !== 'ResourceNotFoundException') throw err;
+      results.push({
+        coreNetworkId: summary.CoreNetworkId,
+        coreNetworkArn: summary.CoreNetworkArn ?? '',
+        globalNetworkId: summary.GlobalNetworkId ?? '',
+        description: summary.Description ?? '',
+        tags: tagsToRecord(summary.Tags),
+        state: (summary.State ?? '').toLowerCase(),
+        edges: [],
+        segments: [],
+        summaryOnly: true,
+      });
+      continue;
+    }
     const cn = detail.CoreNetwork;
     if (!cn) continue;
 
@@ -117,6 +142,10 @@ export async function fetchCloudWanRoutes(
   const routeMap = new Map<string, CloudWanSegmentRoutes[]>();
 
   for (const cn of coreNetworks) {
+    // No segments to read routes from — and recording an empty list here
+    // would read as "no routes" and block the owner's real routes when the
+    // owner account is added as a spoke (mergeSpokeCloudWan only fills gaps).
+    if (cn.summaryOnly) continue;
     const segmentRoutes: CloudWanSegmentRoutes[] = [];
 
     for (const segment of cn.segments) {

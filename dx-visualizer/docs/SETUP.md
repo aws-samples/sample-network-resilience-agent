@@ -357,6 +357,8 @@ See [`console-deployment/README.md`](../../backend/console-deployment/README.md)
 
 The app uses a **single set of credentials** from the **networking account**. From these credentials, the app can already discover TGWs, VGWs, and their owner account IDs via `DescribeDirectConnectGatewayAssociations`. However, to enrich the topology with VPC names and details from **spoke accounts**, the app can assume a role into each spoke account.
 
+The same role also reads **Cloud WAN**. A core network is readable only from the account that owns it, so if your Direct Connect gateways and your Cloud WAN core network are in different accounts, the networking account alone draws its DX gateways with nothing behind them. Add the Cloud WAN owner account as a spoke account and the app fetches the core network, its attachments, peerings and routes through this role. The policy in Step 1 already includes the `networkmanager:*` read actions this needs — there is nothing extra to grant.
+
 This requires a trust relationship between the networking account and each spoke account.
 
 ### Step 1: Create the IAM policy in the spoke account

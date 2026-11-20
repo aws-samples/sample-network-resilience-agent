@@ -1465,12 +1465,18 @@ export function buildGraph(
     const cnId = `cwan-${cn.coreNetworkId}`;
     const segmentNames = cn.segments.map((s) => s.name).join(', ');
     const edgeLocs = cn.edges.map((e) => e.edgeLocation).join(', ');
+    // Owner from the ARN (arn:aws:networkmanager::<owner>:core-network/<id>):
+    // present on both a full copy and a RAM-shared summary-only one, so a core
+    // network owned by a hub account is marked cross-account like a TGW or VPC.
+    const cnOwner = cn.coreNetworkArn.split(':')[4] ?? '';
+    const cnCrossAccount = !!cnOwner && !!homeAccountId && cnOwner !== homeAccountId;
     addNode(makeNode(cnId, 'coreNetwork', cn.description || cn.coreNetworkId, {
       resourceId: cn.coreNetworkId,
       details: {
         state: cn.state,
         ...(segmentNames ? { segments: segmentNames } : {}),
         ...(edgeLocs ? { edgeLocations: edgeLocs } : {}),
+        ...(cnCrossAccount ? { crossAccount: 'true', ownerAccount: cnOwner } : {}),
       },
     }));
 
