@@ -432,6 +432,13 @@ export interface CloudWanCoreNetwork {
     edgeLocations: string[];
     sharedSegments: string[];
   }[];
+  // Built from ListCoreNetworks alone: this account received the core network
+  // through RAM, and only the owner can GetCoreNetwork it. `edges` and
+  // `segments` are then UNKNOWN, not empty — a real core network can also have
+  // none while its policy is pending, which is why this is a flag and not
+  // inferred from empty arrays. A full copy fetched from the owner (as a spoke
+  // account) replaces it; see mergeSpokeCloudWan.
+  summaryOnly?: true;
 }
 
 export interface CloudWanAttachment {

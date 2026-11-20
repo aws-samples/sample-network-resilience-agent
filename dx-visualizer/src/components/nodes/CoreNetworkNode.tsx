@@ -14,7 +14,10 @@ export function CoreNetworkNode({ id, data }: NodeProps) {
   const isExpanded = useTopologyStore((s) => s.expandedCloudWanRoutePanels.has(d.resourceId ?? ''));
   const togglePanel = useTopologyStore((s) => s.toggleCloudWanRoutePanel);
   const segmentRoutes = useTopologyStore((s) => s.topologyData?.cloudWanRoutes.get(d.resourceId ?? ''));
+  const theme = useTopologyStore((s) => s.theme);
   const state = d.details?.state;
+  const isCrossAccount = d.details?.crossAccount === 'true';
+  const accountColor = theme === 'light' ? '#d97706' : '#fbbf24';
   return (
     <BaseNode
       nodeId={id}
@@ -26,9 +29,15 @@ export function CoreNetworkNode({ id, data }: NodeProps) {
       bgColor="#1e1033"
       badges={d.badges}
       targetHandleIds={d.targetHandleIds}
+      // Only when cross-account: any accent (even 'default') overrides
+      // borderColor in BaseNode, which would recolour own core networks.
+      accent={isCrossAccount ? 'crossAccount' : undefined}
     >
       {d.resourceId && (
         <span className="text-[9px] text-slate-500 font-tech">{r(d.resourceId)}</span>
+      )}
+      {isCrossAccount && d.details?.ownerAccount && (
+        <span className="text-[9px] font-tech whitespace-nowrap" style={{ color: accountColor }}>{r(`Account: ${d.details.ownerAccount}`)}</span>
       )}
       {d.details?.segments && (
         <span className="text-[9px] text-violet-400 font-tech">Segments: {d.details.segments}</span>

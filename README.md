@@ -87,7 +87,7 @@ The fetch logic in `fetch-topology.ts` is structured into five phases:
 2. **Phase 2 (Discover)** — Collect all relevant regions from DX Gateway association regions + Cloud WAN edge locations + Cloud WAN attachment locations + DX Gateway attachment VIF regions (via `DescribeDirectConnectGatewayAttachments`, which reveals regions where connections/LAGs live that the regional APIs won't expose). No manual region selection required.
 3. **Phase 3 (Per-Region)** — For each discovered region, fetch DX Connections, VIFs, LAGs, DX Locations, VPCs, TGWs, TGW Route Tables, TGW Attachments, TGW Peering Attachments, VPC Peerings, VPC Route Tables, VPN Gateways, VPN Connections, and Customer Gateways in parallel. `DescribeLocations` is called per region so the merged set includes each regional endpoint's location names (deduped by `locationCode`).
 4. **Phase 4 (Merge)** — Deduplicate and merge all regional results into a single `TopologyData` object.
-5. **Phase 5 (Enrich, optional)** — If spoke account IDs are provided, assume IAM role in each spoke account and fetch VPCs across discovered regions to enrich cross-account VPCs with name/CIDR.
+5. **Phase 5 (Enrich, optional)** — If spoke account IDs are provided, assume IAM role in each spoke account and fetch VPCs across discovered regions to enrich cross-account VPCs with name/CIDR, plus any Cloud WAN core network the spoke owns (with its attachments, peerings and routes).
 
 
 ## 3. Cross-Account Discovery
@@ -100,7 +100,7 @@ Without any cross-account role assumption, the networking account can see:
 
 - **All DX connections, VIFs, DX gateways, associations** — it owns them
 - **All TGW attachments** including cross-account VPC attachments — each attachment has `resourceOwnerId` (spoke account ID) and `resourceId` (VPC ID)
-- **All Cloud WAN attachments** with the same cross-account visibility
+- **All Cloud WAN attachments** with the same cross-account visibility — **when it owns the core network**. If the core network lives in a separate hub account, the networking account sees only its own attachments to it; add the hub as a spoke account (§3.2) to draw the core network
 - **VPN connections and Customer Gateways** it owns
 
 Cross-account spoke VPCs are automatically discovered from TGW attachment metadata — no IAM role assumption into spoke accounts is needed. The trade-off is that only the VPC ID and owner account are visible (not VPC name or CIDR), since those details require API calls within the spoke account.
@@ -112,6 +112,7 @@ For richer VPC detail (name, CIDR), users can optionally provide spoke account I
 1. Assume the specified role (default: `NetworkReadOnlyRole`) in each spoke account via STS
 2. Fetch VPCs from all auto-discovered regions
 3. Merge the enriched VPC data (name, CIDR, tags) into the topology, replacing the lightweight TGW-attachment-only entries
+4. Fetch any Cloud WAN core network the spoke owns, with its attachments, peerings and routes. Core networks are readable only from their owning account, so this is how a DX gateway associated with a hub account's core network gets its DX Gateway → Core Network edge
 
 This is entirely optional — the baseline works with zero cross-account setup.
 

@@ -4,6 +4,7 @@ import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { createDxClient, createEc2Client, createNetworkManagerClient, createSsmClient, createStsClient } from './aws-client';
 import { fetchRegionNames } from './regions';
 import { fetchCoreNetworks, fetchCloudWanAttachments, fetchCloudWanPeerings, fetchCloudWanRoutes } from './cloud-wan';
+import { mergeSpokeCloudWan, type SpokeCloudWan } from './spoke-cloudwan';
 import {
   fetchConnections,
   fetchVirtualInterfaces,
@@ -407,7 +408,8 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
 
   // --- Phase 5 (optional): Enrich from spoke accounts ---
   // Fetch VPCs, TGWs, and TGW attachments from spoke accounts so cross-account
-  // resources appear in the topology with full details (name, CIDR, routes).
+  // resources appear in the topology with full details (name, CIDR, routes),
+  // plus any Cloud WAN core network the spoke owns (see mergeSpokeCloudWan).
   if (creds.spokeAccounts?.length) {
     const roleName = creds.crossAccountRoleName || 'NetworkReadOnlyRole';
     console.log(`[AWS] Enriching from ${creds.spokeAccounts.length} spoke accounts (role: ${roleName})`);
@@ -415,11 +417,38 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
     const existingVpcIds = new Set(topology.vpcs.map((v) => v.vpcId));
     const existingTgwIds = new Set(topology.transitGateways.map((t) => t.transitGatewayId));
     const existingTgwAttIds = new Set(topology.transitGatewayAttachments.map((a) => a.transitGatewayAttachmentId));
+    // Only FULLY known core networks: a summary-only one (shared to the
+    // signed-in account through RAM) still needs its owner's routes.
+    const existingCoreNetworkIds = new Set(
+      topology.cloudWanCoreNetworks.filter((c) => !c.summaryOnly).map((c) => c.coreNetworkId),
+    );
+    const emptyCloudWan = (): SpokeCloudWan => ({ coreNetworks: [], attachments: [], peerings: [], routes: new Map() });
 
     const spokeResults = await Promise.allSettled(
       creds.spokeAccounts.map(async (accountId) => {
         const spokeCreds = await assumeRoleInAccount(creds, accountId, roleName);
-        if (!spokeCreds) return { vpcs: [] as TopologyData['vpcs'], tgws: [] as TopologyData['transitGateways'], tgwAtts: [] as TopologyData['transitGatewayAttachments'], tgwRoutes: new Map() as TopologyData['tgwRouteTables'], vpcRts: [] as import('../types/aws-resources').VpcRouteTable[] };
+        if (!spokeCreds) return { vpcs: [] as TopologyData['vpcs'], tgws: [] as TopologyData['transitGateways'], tgwAtts: [] as TopologyData['transitGatewayAttachments'], tgwRoutes: new Map() as TopologyData['tgwRouteTables'], vpcRts: [] as import('../types/aws-resources').VpcRouteTable[], cloudWan: emptyCloudWan() };
+
+        // Cloud WAN is global (Network Manager, us-west-2): one set of calls per
+        // spoke, run alongside the regional sweep below. The documented spoke
+        // policy (DxVisualizerReadOnly, SETUP.md §6) already grants these
+        // actions. Routes are fetched only for core networks the signed-in
+        // account does not already fully know — GetNetworkRoutes runs per
+        // segment × edge, so re-fetching a known core network would be pure cost.
+        const cloudWanPromise = (async (): Promise<SpokeCloudWan> => {
+          const spokeNm = createNetworkManagerClient(spokeCreds);
+          const [coreNetworks, attachments, peerings] = await Promise.all([
+            logged(`${accountId}/CloudWanCoreNetworks`, fetchCoreNetworks(spokeNm), fetchIssues),
+            logged(`${accountId}/CloudWanAttachments`, fetchCloudWanAttachments(spokeNm), fetchIssues),
+            logged(`${accountId}/CloudWanPeerings`, fetchCloudWanPeerings(spokeNm), fetchIssues),
+          ]);
+          const newCoreNetworks = coreNetworks.filter((cn) => !existingCoreNetworkIds.has(cn.coreNetworkId));
+          const routes = newCoreNetworks.length > 0
+            ? await fetchCloudWanRoutes(spokeNm, newCoreNetworks)
+                .catch((err) => { console.warn(`[AWS] ${accountId}/CloudWanRoutes FAILED:`, err); return new Map() as TopologyData['cloudWanRoutes']; })
+            : new Map() as TopologyData['cloudWanRoutes'];
+          return { coreNetworks, attachments, peerings, routes };
+        })();
 
         // Fetch VPCs, TGWs, and TGW attachments from all discovered regions in parallel
         // (including the home/default region, which was removed from discoveredRegions
@@ -460,14 +489,19 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
         for (const r of regionData) {
           for (const [tgwId, routes] of r.tgwRoutes) allTgwRoutes.set(tgwId, routes);
         }
-        return { vpcs: allVpcs, tgws: allTgws, tgwAtts: allTgwAtts, tgwRoutes: allTgwRoutes, vpcRts: allVpcRts };
+        return { vpcs: allVpcs, tgws: allTgws, tgwAtts: allTgwAtts, tgwRoutes: allTgwRoutes, vpcRts: allVpcRts, cloudWan: await cloudWanPromise };
       })
     );
 
     let enrichedVpcs = 0, enrichedTgws = 0, enrichedTgwAtts = 0, enrichedVpcRts = 0;
+    let enrichedCoreNetworks = 0, enrichedCwAttachments = 0, enrichedCwPeerings = 0;
     for (const result of spokeResults) {
       if (result.status !== 'fulfilled') continue;
-      const { vpcs: spokeVpcs, tgws: spokeTgws, tgwAtts: spokeTgwAtts, tgwRoutes: spokeTgwRoutes, vpcRts: spokeVpcRts } = result.value;
+      const { vpcs: spokeVpcs, tgws: spokeTgws, tgwAtts: spokeTgwAtts, tgwRoutes: spokeTgwRoutes, vpcRts: spokeVpcRts, cloudWan: spokeCloudWan } = result.value;
+      const cw = mergeSpokeCloudWan(topology, spokeCloudWan);
+      enrichedCoreNetworks += cw.coreNetworks;
+      enrichedCwAttachments += cw.attachments;
+      enrichedCwPeerings += cw.peerings;
       for (const vpc of spokeVpcs) {
         if (!existingVpcIds.has(vpc.vpcId)) {
           topology.vpcs.push(vpc);
@@ -504,7 +538,7 @@ export async function fetchAllTopologyData(creds: AwsCredentials): Promise<Topol
         }
       }
     }
-    console.log(`[AWS] Enriched from spoke accounts: ${enrichedVpcs} VPCs, ${enrichedTgws} TGWs, ${enrichedTgwAtts} TGW attachments, ${enrichedVpcRts} VPC route tables`);
+    console.log(`[AWS] Enriched from spoke accounts: ${enrichedVpcs} VPCs, ${enrichedTgws} TGWs, ${enrichedTgwAtts} TGW attachments, ${enrichedVpcRts} VPC route tables, ${enrichedCoreNetworks} Cloud WAN core networks, ${enrichedCwAttachments} Cloud WAN attachments, ${enrichedCwPeerings} Cloud WAN peerings`);
   }
 
   // Attach last, so it captures issues from every phase including the spoke-

@@ -257,12 +257,12 @@ export default function App() {
             <div data-tour="topology" className="absolute inset-0">
               <FlowCanvas />
             </div>
-            {/* Above the canvas but below the score card, pinned bottom-left so
-                it does not cover the Legend/Layers panels (top-right) or the
-                draw hint (top-left). Deliberately NOT inside FlowCanvas: it must
-                stay visible even when the canvas renders nothing, which is
-                exactly the case when a fetch failed. */}
-            <div className="absolute bottom-4 left-4 z-20 pointer-events-auto">
+            {/* Top-centre of the canvas: bottom-left is the score card,
+                top-right the Legend/Layers panels, top-left the draw hint.
+                Deliberately NOT inside FlowCanvas: it must stay visible even
+                when the canvas renders nothing, which is exactly the case when
+                a fetch failed. */}
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 w-max max-w-[90%] z-20 pointer-events-auto">
               <IncompleteDataBanner />
             </div>
             <EmptyStateBanner welcomeDismissed={welcomeDismissed} />
